@@ -131,31 +131,38 @@ class TestITN(FrappeTestCase):
     def test_all_checks_pass_complete(self):
         with patch.object(itn_service, "_server_validate", return_value=(True, {"status": "VALID"})):
             with patch.object(itn_service, "_create_payment_entry", return_value="PE-TEST-1"):
-                log = self._make_log()
-                payload = _itn_payload(log, passphrase="testpass")
-                result = self._process(log, payload)
-                self.assertEqual(result.status, "Complete")
-                self.assertTrue(result.processed)
-                self.assertTrue(result.signature_valid)
-                self.assertTrue(result.source_valid)
-                self.assertTrue(result.amount_valid)
-                self.assertTrue(result.server_valid)
-                self.assertEqual(result.payment_entry, "PE-TEST-1")
-                self.assertTrue(result.paid_at)
-                # amount_* persisted from the ITN (fix #9).
-                self.assertEqual(float(result.amount_gross), 100.00)
-                self.assertEqual(float(result.amount_net), 100.00)
+                with patch.object(frappe, "publish_realtime") as mock_rt:
+                    log = self._make_log()
+                    payload = _itn_payload(log, passphrase="testpass")
+                    result = self._process(log, payload)
+                    self.assertEqual(result.status, "Complete")
+                    self.assertTrue(result.processed)
+                    self.assertTrue(result.signature_valid)
+                    self.assertTrue(result.source_valid)
+                    self.assertTrue(result.amount_valid)
+                    self.assertTrue(result.server_valid)
+                    self.assertEqual(result.payment_entry, "PE-TEST-1")
+                    self.assertTrue(result.paid_at)
+                    self.assertEqual(float(result.amount_gross), 100.00)
+                    self.assertEqual(float(result.amount_net), 100.00)
+                    mock_rt.assert_called_once()
+                    args = mock_rt.call_args
+                    self.assertEqual(args[0][0], "payfast_payment_confirmed")
+                    self.assertEqual(args[0][1]["payment_log"], log.name)
+                    self.assertEqual(args[0][1]["reference_name"], self.si_name)
 
     def test_signature_invalid_goes_to_review(self):
         with patch.object(itn_service, "_server_validate", return_value=(True, {})):
-            log = self._make_log()
-            payload = _itn_payload(log, passphrase="testpass")
-            payload["signature"] = "deadbeef" * 4
-            result = self._process(log, payload)
-            self.assertEqual(result.status, "Manual Review")
-            self.assertFalse(result.processed)
-            self.assertFalse(result.signature_valid)
-            self.assertIn("signature", result.review_reason)
+            with patch.object(frappe, "publish_realtime") as mock_rt:
+                log = self._make_log()
+                payload = _itn_payload(log, passphrase="testpass")
+                payload["signature"] = "deadbeef" * 4
+                result = self._process(log, payload)
+                self.assertEqual(result.status, "Manual Review")
+                self.assertFalse(result.processed)
+                self.assertFalse(result.signature_valid)
+                self.assertIn("signature", result.review_reason)
+                mock_rt.assert_not_called()
 
     def test_source_invalid_goes_to_review(self):
         with patch.object(itn_service, "_server_validate", return_value=(True, {})):
@@ -187,11 +194,35 @@ class TestITN(FrappeTestCase):
 
     def test_failed_status(self):
         with patch.object(itn_service, "_server_validate", return_value=(True, {})):
-            log = self._make_log()
-            payload = _itn_payload(log, passphrase="testpass", payment_status="FAILED")
-            result = self._process(log, payload)
-            self.assertEqual(result.status, "Failed")
-            self.assertTrue(result.processed)
+            with patch.object(frappe, "publish_realtime") as mock_rt:
+                log = self._make_log()
+                payload = _itn_payload(log, passphrase="testpass", payment_status="FAILED")
+                result = self._process(log, payload)
+                self.assertEqual(result.status, "Failed")
+                self.assertTrue(result.processed)
+                mock_rt.assert_not_called()
+
+    def test_server_validate_receives_raw_body(self):
+        from urllib.parse import urlencode
+
+        log = self._make_log()
+        payload = _itn_payload(log, passphrase="testpass")
+        raw_body = urlencode(list((k, v) for k, v in payload.items() if k != "signature") + [
+            ("signature", payload["signature"])
+        ])
+        log.raw_itn_body = raw_body
+        log.save(ignore_permissions=True)
+
+        captured = {}
+
+        def _capture_validate(body, creds):
+            captured["body"] = body
+            return True, {"status": "VALID"}
+
+        with patch.object(itn_service, "_server_validate", side_effect=_capture_validate):
+            with patch.object(itn_service, "_create_payment_entry", return_value="PE-RAW-1"):
+                itn_service.process_itn(log.name, raw_payload_json=json.dumps(payload), raw_body=raw_body)
+        self.assertEqual(captured.get("body"), raw_body)
 
     def test_cancelled_status(self):
         with patch.object(itn_service, "_server_validate", return_value=(True, {})):
@@ -295,3 +326,53 @@ class TestITN(FrappeTestCase):
         allowed = ["www.payfast.co.za", "sandbox.payfast.co.za"]
         self.assertTrue(itn_service._source_valid(payfast_ip, allowed))
         self.assertFalse(itn_service._source_valid("203.0.113.7", allowed))
+
+    def test_complete_publishes_realtime_event(self):
+        with patch.object(itn_service, "_server_validate", return_value=(True, {"status": "VALID"})):
+            with patch.object(itn_service, "_create_payment_entry", return_value="PE-EVT-1"):
+                with patch.object(frappe, "publish_realtime") as mock_pub:
+                    log = self._make_log(m_payment_id="PFM-EVT-1")
+                    log.customer_mobile = "+27123456789"
+                    log.whatsapp_conversation_id = "conv-1"
+                    log.save(ignore_permissions=True)
+                    payload = _itn_payload(log, passphrase="testpass")
+                    self._process(log, payload)
+                    mock_pub.assert_called_once()
+                    event_name, event_data = mock_pub.call_args[0]
+                    self.assertEqual(event_name, "payfast_payment_confirmed")
+                    self.assertEqual(event_data["payment_log"], log.name)
+                    self.assertEqual(event_data["reference_name"], self.si_name)
+                    self.assertEqual(event_data["customer_mobile"], "+27123456789")
+                    self.assertEqual(event_data["conversation_id"], "conv-1")
+
+    def test_signature_failure_does_not_publish_realtime(self):
+        with patch.object(itn_service, "_server_validate", return_value=(True, {})):
+            with patch.object(frappe, "publish_realtime") as mock_pub:
+                log = self._make_log(m_payment_id="PFM-EVT-FAIL")
+                payload = _itn_payload(log, passphrase="testpass")
+                payload["signature"] = "deadbeef" * 4
+                self._process(log, payload)
+                mock_pub.assert_not_called()
+
+    def test_failed_status_does_not_publish_realtime(self):
+        with patch.object(itn_service, "_server_validate", return_value=(True, {})):
+            with patch.object(frappe, "publish_realtime") as mock_pub:
+                log = self._make_log(m_payment_id="PFM-EVT-FAILED")
+                payload = _itn_payload(log, passphrase="testpass", payment_status="FAILED")
+                self._process(log, payload)
+                mock_pub.assert_not_called()
+
+    def test_server_validate_posts_raw_body(self):
+        raw_body = "m_payment_id=PFM-1&payment_status=COMPLETE&signature=abc"
+        creds = {"validate_url": "https://sandbox.payfast.co.za/eng/query/validate"}
+        with patch("payfast_gateway.payfast_gateway.services.itn.requests.post") as mock_post:
+            mock_post.return_value.text = "VALID"
+            mock_post.return_value.status_code = 200
+            ok, _resp = itn_service._server_validate(raw_body, creds)
+            self.assertTrue(ok)
+            mock_post.assert_called_once()
+            self.assertEqual(mock_post.call_args.kwargs["data"], raw_body)
+            self.assertEqual(
+                mock_post.call_args.kwargs["headers"]["Content-Type"],
+                "application/x-www-form-urlencoded",
+            )

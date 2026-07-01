@@ -1,3 +1,5 @@
+import json
+
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
@@ -179,6 +181,79 @@ class TestPaymentLink(FrappeTestCase):
         self.assertIn("booking_status", by_mpid)
         self.assertIn("paid_at", by_mpid)
         self.assertEqual(by_log["payment_log"], created["payment_log"])
+        self.assertEqual(by_mpid["reference_name"], self.si_name)
+        self.assertEqual(by_mpid["booking_status"], "awaiting_payment")
+        self.assertEqual(by_mpid["payment_status"], "awaiting_payment")
+
+    def test_get_payment_status_complete_maps_to_confirmed(self):
+        created = api.create_payment_link(reference_doctype="Sales Invoice", reference_name=self.si_name, amount=100.00)
+        frappe.db.set_value("PayFast Payment Log", created["payment_log"], "status", "Complete")
+        row = api.get_payment_status(payment_log=created["payment_log"])
+        self.assertEqual(row["booking_status"], "confirmed")
+        self.assertEqual(row["payment_status"], "paid")
+
+    def test_default_urls_when_settings_blank(self):
+        self.settings.notify_url = ""
+        self.settings.return_url = ""
+        self.settings.cancel_url = ""
+        self.settings.save(ignore_permissions=True)
+        result = api.create_payment_link(
+            reference_doctype="Sales Invoice", reference_name=self.si_name, amount=50.00
+        )
+        log = frappe.get_doc("PayFast Payment Log", result["payment_log"])
+        payload = json.loads(log.request_payload_json)
+        self.assertIn("/api/method/payfast_gateway.payfast_gateway.api.payfast_itn", payload["notify_url"])
+        self.assertIn("/pf-return", payload["return_url"])
+        self.assertIn("/pf-cancel", payload["cancel_url"])
+
+    def test_amount_exceeds_outstanding_rejected(self):
+        self.assertRaises(
+            frappe.ValidationError,
+            api.create_payment_link,
+            reference_doctype="Sales Invoice",
+            reference_name=self.si_name,
+            amount=150.00,
+        )
+
+    def test_partial_payment_amount_allowed(self):
+        result = api.create_payment_link(
+            reference_doctype="Sales Invoice", reference_name=self.si_name, amount=50.00
+        )
+        self.assertTrue(result["ok"])
+
+    def test_regenerate_by_payment_log(self):
+        created = api.create_payment_link(reference_doctype="Sales Invoice", reference_name=self.si_name, amount=100.00)
+        regenerated = api.regenerate_payment_link(payment_log=created["payment_log"])
+        self.assertTrue(regenerated["ok"])
+        self.assertNotEqual(created["m_payment_id"], regenerated["m_payment_id"])
+
+    def test_cancel_by_payment_log(self):
+        created = api.create_payment_link(reference_doctype="Sales Invoice", reference_name=self.si_name, amount=100.00)
+        out = api.cancel_payment_request(payment_log=created["payment_log"], reason="test")
+        self.assertEqual(out["status"], "Cancelled")
+
+    def test_regenerate_blocked_when_processing(self):
+        created = api.create_payment_link(reference_doctype="Sales Invoice", reference_name=self.si_name, amount=100.00)
+        frappe.db.set_value("PayFast Payment Log", created["payment_log"], "status", "Processing")
+        self.assertRaises(
+            frappe.ValidationError,
+            api.regenerate_payment_link,
+            payment_log=created["payment_log"],
+        )
+
+    def test_sandbox_process_url_fallback_on_pf_page(self):
+        created = api.create_payment_link(reference_doctype="Sales Invoice", reference_name=self.si_name, amount=100.00)
+        name = created["payment_log"]
+        token = frappe.db.get_value("PayFast Payment Log", name, "redirect_token")
+        frappe.db.set_value("PayFast Payment Log", name, "process_url", "")
+        frappe.form_dict = frappe._dict({"token": token})
+        try:
+            context = frappe._dict()
+            pf_index.get_context(context)
+            self.assertTrue(context.show_form)
+            self.assertIn("sandbox.payfast.co.za", context.process_url)
+        finally:
+            frappe.form_dict = frappe._dict()
 
     def test_expired_link_page_shows_error(self):
         created = api.create_payment_link(reference_doctype="Sales Invoice", reference_name=self.si_name, amount=100.00)

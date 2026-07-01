@@ -2,6 +2,7 @@ import frappe
 from frappe.utils import add_to_date, cint, now_datetime
 
 from payfast_gateway.payfast_gateway.doctype.payfast_settings.payfast_settings import get_settings
+from payfast_gateway.payfast_gateway.services.itn import _update_reference_payfast_status
 
 
 def expire_stale_links():
@@ -16,18 +17,8 @@ def expire_stale_links():
     for name in stale:
         frappe.db.set_value("PayFast Payment Log", name, "status", "Cancelled")
         log = frappe.get_doc("PayFast Payment Log", name)
-        _sync_reference_payfast_status(log, "Cancelled")
+        _update_reference_payfast_status(
+            log.reference_doctype, log.reference_docname, "Cancelled"
+        )
     if stale and not frappe.flags.in_test:
         frappe.db.commit()
-
-
-def _sync_reference_payfast_status(log, payfast_status):
-    if log.reference_doctype != "Sales Invoice" or not log.reference_docname:
-        return
-    if not frappe.db.exists(log.reference_doctype, log.reference_docname):
-        return
-    meta = frappe.get_meta(log.reference_doctype)
-    if meta.has_field("payfast_status"):
-        frappe.db.set_value(
-            log.reference_doctype, log.reference_docname, "payfast_status", payfast_status
-        )

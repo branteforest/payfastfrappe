@@ -459,9 +459,9 @@ any + Manual Review → manual_review (escalate to human, no auto messages claim
 
 ## 8. Payment confirmation delivery
 
-### 8.1 Target: realtime event (recommended)
+### 8.1 Realtime event (recommended)
 
-After gateway P0 work, ERPNext will emit:
+ERPNext emits when a verified payment completes:
 
 ```
 Event: payfast_payment_confirmed
@@ -481,31 +481,25 @@ Event: payfast_payment_confirmed
 
 **Your service should:**
 
-1. Subscribe via Frappe Socket.IO / webhook bridge / message queue (implementation depends on your infra).
+1. Subscribe via Frappe Socket.IO / webhook bridge / message queue.
 2. Match `conversation_id` to the active WhatsApp thread.
 3. Send the confirmation template (§9).
 4. Set conversation `phase = confirmed`.
 
 If `conversation_id` was not passed at link creation, fall back to matching on `customer_mobile` + open `payment_log`.
 
-### 8.2 Interim: polling (use today)
+### 8.2 Fallback: polling
 
-Until the event is deployed:
-
-1. After sending `payment_url`, start a background poll loop on `payment_log`.
-2. On `status == Complete`, send confirmation and stop.
-3. Optionally combine with customer messages (“I’ve paid”) → single `get_payment_status` check, still **never** trust the message alone.
-
-Example poll loop (pseudo):
+You can also poll `get_payment_status` until `payment_status == "paid"` (or internal log `status == Complete`). Useful when realtime subscription is not wired yet, or as a backup:
 
 ```python
 async def wait_for_payment(payment_log: str, expires_at: datetime):
     while datetime.utcnow() < expires_at:
         msg = get_payment_status_tool(payment_log=payment_log)
-        if msg["status"] == "Complete":
+        if msg["payment_status"] == "paid":
             return "confirmed"
-        if msg["status"] in ("Failed", "Cancelled", "Manual Review"):
-            return msg["status"]
+        if msg["payment_status"] in ("failed", "manual_review"):
+            return msg["payment_status"]
         await asyncio.sleep(20)
     return "expired"
 ```
@@ -551,12 +545,10 @@ Step-by-step for agent developers testing against sandbox:
 
 ## 11. Sales Invoice vs Sales Order
 
-| Reference | `create_payment_link` | Automatic payment on ITN (v1) |
-|-----------|----------------------|--------------------------------|
+| Reference | `create_payment_link` | Automatic payment on ITN |
+|-----------|----------------------|---------------------------|
 | Sales Invoice | Supported | **Yes** — Payment Entry allocated to invoice |
-| Sales Order | Supported | **No** — log goes to Manual Review until P2 SO work ships |
-
-**Agent team recommendation for v1:** always create and submit a **Sales Invoice** before requesting payment. Do not promise auto-confirmation on Sales Order-only flows until gateway P2 is deployed.
+| Sales Order | Supported | **Yes** — advance Payment Entry via `get_payment_entry` |
 
 ---
 

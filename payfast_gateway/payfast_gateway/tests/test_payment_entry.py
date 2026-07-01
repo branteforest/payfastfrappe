@@ -234,3 +234,62 @@ class TestPaymentEntry(FrappeTestCase):
         self.assertEqual(log.status, "Manual Review")
         self.assertFalse(log.processed)
         self.assertEqual(frappe.db.count("Payment Entry", {"reference_no": "PF12345"}), 0)
+
+    def test_sales_order_complete_creates_advance_payment_entry(self):
+        try:
+            from erpnext.accounts.doctype.payment_entry.payment_entry import get_payment_entry  # noqa: F401
+        except ImportError:
+            self.skipTest("ERPNext not available")
+
+        customer = self.customer
+        item = frappe.get_all("Item", filters={"is_sales_item": 1}, pluck="name")[0]
+        so = frappe.get_doc({
+            "doctype": "Sales Order",
+            "customer": customer,
+            "company": frappe.defaults.get_user_default("Company"),
+            "items": [{"item_code": item, "qty": 1, "rate": 100.00}],
+        })
+        so.insert(ignore_permissions=True)
+        so.submit()
+
+        log = _make_log(m_payment_id="PFM-SO-001")
+        log.reference_doctype = "Sales Order"
+        log.reference_docname = so.name
+        log.customer = customer
+        log.save(ignore_permissions=True)
+
+        payload = {
+            "m_payment_id": log.m_payment_id,
+            "pf_payment_id": "PF-SO-001",
+            "payment_status": "COMPLETE",
+            "amount_gross": "100.00",
+            "amount_fee": "0.00",
+            "amount_net": "100.00",
+            "merchant_id": "10000100",
+            "item_name": "Test",
+        }
+        items = [(k, v) for k, v in payload.items()]
+        payload["signature"] = generate_signature(items, "testpass")
+
+        try:
+            with patch.object(itn_service, "_server_validate", return_value=(True, {"status": "VALID"})):
+                itn_service.process_itn(
+                    log.name,
+                    raw_payload_json=json.dumps(payload),
+                    raw_body="m_payment_id=x",
+                    source_host="www.payfast.co.za",
+                )
+        finally:
+            log.reload()
+            if log.payment_entry and frappe.db.exists("Payment Entry", log.payment_entry):
+                pe = frappe.get_doc("Payment Entry", log.payment_entry)
+                if pe.docstatus == 1:
+                    pe.cancel()
+                frappe.delete_doc("Payment Entry", log.payment_entry, force=True)
+            if so.docstatus == 1:
+                so.cancel()
+            frappe.delete_doc("Sales Order", so.name, force=True)
+
+        self.assertEqual(log.status, "Complete")
+        self.assertTrue(log.processed)
+        self.assertTrue(log.payment_entry)
