@@ -14,7 +14,10 @@ from payfast_gateway.payfast_gateway.doctype.payfast_settings.payfast_settings i
     get_settings,
     is_enabled,
 )
-from payfast_gateway.payfast_gateway.services.itn import _update_reference_payfast_status
+from payfast_gateway.payfast_gateway.services.itn import (
+    _update_reference_payfast_status,
+    notify_manual_review,
+)
 from payfast_gateway.payfast_gateway.services.signature import (
     REDIRECT_FIELD_ORDER,
     generate_signature,
@@ -205,6 +208,16 @@ def create_payment_link(reference_doctype="Sales Invoice", reference_name=None,
 
     _validate_amount_against_reference(reference_doctype, ref, amount)
 
+    # Serialize concurrent create_payment_link calls for the same reference
+    # document so two near-simultaneous requests can't both miss the existing
+    # "Awaiting Payment" log and each mint a separate active link. Held for
+    # the rest of the request (no outbound network I/O happens before the
+    # transaction commits, so this never blocks across a slow external call).
+    frappe.db.sql(
+        f"SELECT name FROM `tab{reference_doctype}` WHERE name = %s FOR UPDATE",  # noqa: S608 - reference_doctype is whitelist-validated above
+        (reference_name,),
+    )
+
     existing = frappe.db.get_value(
         "PayFast Payment Log",
         {
@@ -392,10 +405,32 @@ def payfast_itn():
             return "OK"
 
         # Respect the master kill switch: raw is stored + 200, but skip processing.
+        # If the log hasn't reached a settled state yet, route it to Manual Review
+        # (rather than leaving the prior status untouched) so a payment received
+        # while disabled is never silently invisible to ops. Never override an
+        # already-settled or already-verified log (Complete / ERP Sync Failed /
+        # Manual Review / Failed / Cancelled).
         if not is_enabled():
+            current_status = frappe.db.get_value("PayFast Payment Log", log_name, "status")
+            if current_status in ("Awaiting Payment", "Processing"):
+                review_reason = (
+                    "ITN received while PayFast integration was disabled "
+                    "(master kill switch). Re-enable and reprocess manually."
+                )
+                frappe.db.set_value(
+                    "PayFast Payment Log",
+                    log_name,
+                    {"status": "Manual Review", "review_reason": review_reason},
+                    update_modified=True,
+                )
+                if not frappe.flags.in_test:
+                    frappe.db.commit()
+                notify_manual_review(
+                    frappe.get_doc("PayFast Payment Log", log_name), review_reason
+                )
             frappe.log_error(
                 title="PayFast ITN received while disabled",
-                message=f"log={log_name} m_payment_id={m_payment_id}",
+                message=f"log={log_name} m_payment_id={m_payment_id} status={current_status}",
             )
             return "OK"
 

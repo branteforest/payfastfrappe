@@ -13,7 +13,7 @@ class TestLinkExpiry(FrappeTestCase):
     def tearDown(self):
         frappe.set_user(self._orig_user)
         for name in frappe.get_all("PayFast Payment Log", pluck="name"):
-            frappe.delete_doc("PayFast Payment Log", name, force=True)
+            frappe.delete_doc("PayFast Payment Log", name, force=True, ignore_on_trash=True)
 
     def test_expire_stale_links_cancels_old_awaiting_logs(self):
         log = frappe.get_doc({

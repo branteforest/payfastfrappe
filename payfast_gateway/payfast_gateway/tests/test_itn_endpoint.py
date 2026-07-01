@@ -53,6 +53,7 @@ class TestITNEndpoint(FrappeTestCase):
         self._orig = {
             "environment": self.settings.environment,
             "sandbox_merchant_id": self.settings.sandbox_merchant_id,
+            "sandbox_merchant_key": self.settings.sandbox_merchant_key,
             "sandbox_passphrase": self.settings.sandbox_passphrase,
             "allowed_source_hosts": self.settings.allowed_source_hosts,
             "clearing_account": self.settings.clearing_account,
@@ -62,6 +63,7 @@ class TestITNEndpoint(FrappeTestCase):
         }
         self.settings.environment = "Sandbox"
         self.settings.sandbox_merchant_id = "10000100"
+        self.settings.sandbox_merchant_key = "46f0cd69b5816e2726fbe6b1"
         self.settings.sandbox_passphrase = "testpass"
         self.settings.allowed_source_hosts = "www.payfast.co.za\nsandbox.payfast.co.za"
         self.settings.currency = "ZAR"
@@ -88,7 +90,11 @@ class TestITNEndpoint(FrappeTestCase):
         frappe.set_user(self._orig_user)
         for k, v in self._orig.items():
             self.settings.set(k, v)
-        self.settings.save(ignore_permissions=True)
+        try:
+            self.settings.save(ignore_permissions=True)
+        except frappe.ValidationError:
+            self.settings.enabled = 0
+            self.settings.save(ignore_permissions=True)
         for n in frappe.get_all("Payment Entry", pluck="name"):
             try:
                 pe = frappe.get_doc("Payment Entry", n)
@@ -99,7 +105,7 @@ class TestITNEndpoint(FrappeTestCase):
             except Exception:
                 pass
         for n in frappe.get_all("PayFast Payment Log", pluck="name"):
-            frappe.delete_doc("PayFast Payment Log", n, force=True)
+            frappe.delete_doc("PayFast Payment Log", n, force=True, ignore_on_trash=True)
         if self.si_name and frappe.db.exists("Sales Invoice", self.si_name):
             si = frappe.get_doc("Sales Invoice", self.si_name)
             if si.docstatus == 1:
@@ -226,6 +232,44 @@ class TestITNEndpoint(FrappeTestCase):
             with self._request(body):
                 self.assertEqual(api.payfast_itn(), "OK")  # retry
         self.assertEqual(frappe.db.count("Payment Entry", {"reference_no": "PF-END-DUP"}), 1)
+        result = frappe.get_doc("PayFast Payment Log", log.name)
+        self.assertEqual(result.status, "Complete")
+
+    def test_endpoint_itn_while_disabled_routes_to_manual_review(self):
+        """An ITN received while the master kill switch is off must never be
+        silently dropped in Awaiting Payment/Processing -- it should surface
+        in Manual Review so ops don't lose track of it."""
+        log = self._make_log("PFM-END-DISABLED")
+        body = _signed_body(_pairs(log.m_payment_id, pf_payment_id="PF-END-DISABLED"))
+        self.settings.enabled = 0
+        self.settings.save(ignore_permissions=True)
+        try:
+            with patch.object(frappe, "enqueue", self._inline_enqueue()):
+                with self._request(body):
+                    self.assertEqual(api.payfast_itn(), "OK")
+        finally:
+            self.settings.enabled = 1
+            self.settings.save(ignore_permissions=True)
+        result = frappe.get_doc("PayFast Payment Log", log.name)
+        self.assertEqual(result.status, "Manual Review")
+        self.assertIn("disabled", result.review_reason.lower())
+        self.assertFalse(result.processed)
+
+    def test_endpoint_itn_while_disabled_does_not_override_complete(self):
+        """A duplicate/retry ITN for an already-Complete payment received
+        while disabled must not be clobbered into Manual Review."""
+        log = self._make_log("PFM-END-DISABLED-2")
+        frappe.db.set_value("PayFast Payment Log", log.name, "status", "Complete")
+        body = _signed_body(_pairs(log.m_payment_id, pf_payment_id="PF-END-DISABLED-2"))
+        self.settings.enabled = 0
+        self.settings.save(ignore_permissions=True)
+        try:
+            with patch.object(frappe, "enqueue", self._inline_enqueue()):
+                with self._request(body):
+                    self.assertEqual(api.payfast_itn(), "OK")
+        finally:
+            self.settings.enabled = 1
+            self.settings.save(ignore_permissions=True)
         result = frappe.get_doc("PayFast Payment Log", log.name)
         self.assertEqual(result.status, "Complete")
 

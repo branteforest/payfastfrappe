@@ -1,10 +1,11 @@
 import json
+from unittest.mock import patch
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from payfast_gateway.payfast_gateway import api
-from payfast_gateway.payfast_gateway.www.pf import index as pf_index
+from payfast_gateway.www.pf import index as pf_index
 
 
 class TestPaymentLink(FrappeTestCase):
@@ -41,9 +42,13 @@ class TestPaymentLink(FrappeTestCase):
         frappe.set_user(self._orig_user)
         for k, v in self._orig.items():
             self.settings.set(k, v)
-        self.settings.save(ignore_permissions=True)
+        try:
+            self.settings.save(ignore_permissions=True)
+        except frappe.ValidationError:
+            self.settings.enabled = 0
+            self.settings.save(ignore_permissions=True)
         for name in frappe.get_all("PayFast Payment Log", pluck="name"):
-            frappe.delete_doc("PayFast Payment Log", name, force=True)
+            frappe.delete_doc("PayFast Payment Log", name, force=True, ignore_on_trash=True)
         if self.si_name and frappe.db.exists("Sales Invoice", self.si_name):
             si = frappe.get_doc("Sales Invoice", self.si_name)
             if si.docstatus == 1:
@@ -271,6 +276,44 @@ class TestPaymentLink(FrappeTestCase):
             self.assertEqual(frappe.db.get_value("PayFast Payment Log", name, "status"), "Cancelled")
         finally:
             frappe.form_dict = frappe._dict()
+
+    def test_disabled_kill_switch_blocks_pf_redirect(self):
+        """A link minted before the kill switch was flipped off must never
+        redirect a customer to PayFast once disabled."""
+        created = api.create_payment_link(
+            reference_doctype="Sales Invoice", reference_name=self.si_name, amount=100.00
+        )
+        token = frappe.db.get_value("PayFast Payment Log", created["payment_log"], "redirect_token")
+        self.settings.enabled = 0
+        self.settings.save(ignore_permissions=True)
+        frappe.form_dict = frappe._dict({"token": token})
+        try:
+            context = frappe._dict()
+            pf_index.get_context(context)
+            self.assertFalse(context.show_form)
+            self.assertIn("unavailable", context.error.lower())
+        finally:
+            frappe.form_dict = frappe._dict()
+            self.settings.enabled = 1
+            self.settings.save(ignore_permissions=True)
+
+    def test_create_payment_link_locks_reference_row(self):
+        """create_payment_link must take a row lock on the reference document
+        before the existing-link check so two near-simultaneous requests for
+        the same reference can't both mint an active link."""
+        captured = []
+        real_sql = frappe.db.sql
+
+        def _capture(query, *args, **kwargs):
+            if "FOR UPDATE" in str(query).upper() and "Sales Invoice" in str(query):
+                captured.append((query, args))
+            return real_sql(query, *args, **kwargs)
+
+        with patch.object(frappe.db, "sql", side_effect=_capture):
+            api.create_payment_link(
+                reference_doctype="Sales Invoice", reference_name=self.si_name, amount=100.00
+            )
+        self.assertTrue(captured, "expected a SELECT ... FOR UPDATE lock on the reference document")
 
     def test_role_gating(self):
         if not frappe.db.exists("User", "pf-no-role@example.com"):

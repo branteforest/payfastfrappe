@@ -11,7 +11,7 @@ from payfast_gateway.payfast_gateway.services.signature import generate_signatur
 def _make_log(amount=100.00, m_payment_id="PFM-PE-001"):
     name = frappe.db.get_value("PayFast Payment Log", {"m_payment_id": m_payment_id})
     if name:
-        frappe.delete_doc("PayFast Payment Log", name, force=True)
+        frappe.delete_doc("PayFast Payment Log", name, force=True, ignore_on_trash=True)
     log = frappe.get_doc({
         "doctype": "PayFast Payment Log",
         "m_payment_id": m_payment_id,
@@ -31,14 +31,18 @@ class TestPaymentEntry(FrappeTestCase):
         self._orig = {
             "environment": self.settings.environment,
             "sandbox_merchant_id": self.settings.sandbox_merchant_id,
+            "sandbox_merchant_key": self.settings.sandbox_merchant_key,
             "sandbox_passphrase": self.settings.sandbox_passphrase,
             "clearing_account": self.settings.clearing_account,
             "mode_of_payment": self.settings.mode_of_payment,
             "currency": self.settings.currency,
+            "enabled": self.settings.enabled,
         }
         self.settings.environment = "Sandbox"
         self.settings.sandbox_merchant_id = "10000100"
+        self.settings.sandbox_merchant_key = "46f0cd69b5816e2726fbe6b1"
         self.settings.sandbox_passphrase = "testpass"
+        self.settings.enabled = 1
         self.settings.currency = "ZAR"
         if not self.settings.clearing_account:
             self.settings.clearing_account = frappe.get_all(
@@ -60,7 +64,11 @@ class TestPaymentEntry(FrappeTestCase):
         frappe.set_user(self._orig_user)
         for k, v in self._orig.items():
             self.settings.set(k, v)
-        self.settings.save(ignore_permissions=True)
+        try:
+            self.settings.save(ignore_permissions=True)
+        except frappe.ValidationError:
+            self.settings.enabled = 0
+            self.settings.save(ignore_permissions=True)
         for n in frappe.get_all("Payment Entry", {"reference_no": "PF12345"}, pluck="name"):
             try:
                 pe = frappe.get_doc("Payment Entry", n)
@@ -70,7 +78,7 @@ class TestPaymentEntry(FrappeTestCase):
             except Exception:
                 pass
         for n in frappe.get_all("PayFast Payment Log", pluck="name"):
-            frappe.delete_doc("PayFast Payment Log", n, force=True)
+            frappe.delete_doc("PayFast Payment Log", n, force=True, ignore_on_trash=True)
         if self.si_name and frappe.db.exists("Sales Invoice", self.si_name):
             si = frappe.get_doc("Sales Invoice", self.si_name)
             if si.docstatus == 1:
@@ -132,7 +140,7 @@ class TestPaymentEntry(FrappeTestCase):
         pe = frappe.get_doc("Payment Entry", log.payment_entry)
         self.assertEqual(pe.docstatus, 1)
         self.assertEqual(pe.reference_no, "PF12345")
-        self.assertEqual(pe.payment_entry_type, "Receive")
+        self.assertEqual(pe.payment_type, "Receive")
         # Allocated against the Sales Invoice.
         refs = [r for r in pe.references if r.reference_doctype == "Sales Invoice" and r.reference_name == self.si_name]
         self.assertEqual(len(refs), 1)

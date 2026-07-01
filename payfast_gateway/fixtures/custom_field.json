@@ -1,6 +1,7 @@
 [
   {
     "doctype": "Custom Field",
+    "name": "Sales Invoice-payfast_status",
     "dt": "Sales Invoice",
     "fieldname": "payfast_status",
     "label": "PayFast Status",
@@ -12,6 +13,7 @@
   },
   {
     "doctype": "Custom Field",
+    "name": "Sales Invoice-payfast_payment_log",
     "dt": "Sales Invoice",
     "fieldname": "payfast_payment_log",
     "label": "PayFast Payment Log",

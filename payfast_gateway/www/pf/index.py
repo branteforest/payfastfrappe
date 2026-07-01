@@ -4,11 +4,18 @@ import frappe
 
 from payfast_gateway.payfast_gateway.doctype.payfast_settings.payfast_settings import (
     get_credentials,
+    is_enabled,
 )
 from payfast_gateway.payfast_gateway.services.itn import _update_reference_payfast_status
 
+# Never website-cache this route: Frappe caches by path (query string excluded),
+# so a single cached error render would be served to every subsequent customer
+# regardless of their token.
+no_cache = 1
+
 
 def get_context(context):
+    context.no_cache = 1
     token = frappe.form_dict.get("token")
     if not token:
         context.error = "Missing redirect token."
@@ -19,6 +26,13 @@ def get_context(context):
         log = frappe.get_doc("PayFast Payment Log", {"redirect_token": token})
     except frappe.DoesNotExistError:
         context.error = "Invalid or expired payment link."
+        context.show_form = False
+        return context
+
+    if not is_enabled():
+        # Master kill switch: never send a customer on to PayFast while
+        # disabled, even for a link minted before the switch was flipped off.
+        context.error = "Online payments are temporarily unavailable. Please try again later."
         context.show_form = False
         return context
 

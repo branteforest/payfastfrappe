@@ -1,4 +1,5 @@
 import hashlib
+import hmac
 from urllib.parse import quote_plus
 
 # Field order for the PayFast hosted-redirect request, per the v1 spec.
@@ -84,13 +85,13 @@ def generate_signature(items, passphrase=""):
 
 
 def verify_signature(items, passphrase, received_signature):
-    """Constant-ish compare of a received signature against the computed one."""
+    """Constant-time compare of a received signature against the computed one."""
     if not received_signature:
         return False
     expected = generate_signature(items, passphrase)
     if not expected:
         return False
-    return _constant_time_eq(expected, str(received_signature).strip().lower())
+    return hmac.compare_digest(expected, str(received_signature).strip().lower())
 
 
 def normalize_itn_fields(formdict):
@@ -106,12 +107,3 @@ def normalize_itn_fields(formdict):
             continue
         items.append((name, value))
     return items
-
-
-def _constant_time_eq(a, b):
-    if len(a) != len(b):
-        return False
-    result = 0
-    for x, y in zip(a, b):
-        result |= ord(x) ^ ord(y)
-    return result == 0

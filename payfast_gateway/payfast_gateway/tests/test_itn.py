@@ -35,15 +35,19 @@ class TestITN(FrappeTestCase):
         self._orig = {
             "environment": self.settings.environment,
             "sandbox_merchant_id": self.settings.sandbox_merchant_id,
+            "sandbox_merchant_key": self.settings.sandbox_merchant_key,
             "sandbox_passphrase": self.settings.sandbox_passphrase,
             "allowed_source_hosts": self.settings.allowed_source_hosts,
             "clearing_account": self.settings.clearing_account,
             "mode_of_payment": self.settings.mode_of_payment,
             "currency": self.settings.currency,
+            "enabled": self.settings.enabled,
         }
         self.settings.environment = "Sandbox"
         self.settings.sandbox_merchant_id = "10000100"
+        self.settings.sandbox_merchant_key = "46f0cd69b5816e2726fbe6b1"
         self.settings.sandbox_passphrase = "testpass"
+        self.settings.enabled = 1
         self.settings.allowed_source_hosts = "www.payfast.co.za\nsandbox.payfast.co.za"
         self.settings.currency = "ZAR"
         if not self.settings.mode_of_payment:
@@ -67,9 +71,16 @@ class TestITN(FrappeTestCase):
         frappe.set_user(self._orig_user)
         for k, v in self._orig.items():
             self.settings.set(k, v)
-        self.settings.save(ignore_permissions=True)
+        try:
+            self.settings.save(ignore_permissions=True)
+        except frappe.ValidationError:
+            # The captured original state may itself be "enabled" with blank
+            # credentials (e.g. a singleton never explicitly saved before this
+            # test ran) -- fail safe to disabled rather than raise in teardown.
+            self.settings.enabled = 0
+            self.settings.save(ignore_permissions=True)
         for n in frappe.get_all("PayFast Payment Log", pluck="name"):
-            frappe.delete_doc("PayFast Payment Log", n, force=True)
+            frappe.delete_doc("PayFast Payment Log", n, force=True, ignore_on_trash=True)
         if self.si_name and frappe.db.exists("Sales Invoice", self.si_name):
             si = frappe.get_doc("Sales Invoice", self.si_name)
             if si.docstatus == 1:
@@ -104,7 +115,7 @@ class TestITN(FrappeTestCase):
     def _make_log(self, amount=100.00, m_payment_id="PFM-TEST-001", status="Awaiting Payment"):
         if frappe.db.exists("PayFast Payment Log", {"m_payment_id": m_payment_id}):
             name = frappe.db.get_value("PayFast Payment Log", {"m_payment_id": m_payment_id})
-            frappe.delete_doc("PayFast Payment Log", name, force=True)
+            frappe.delete_doc("PayFast Payment Log", name, force=True, ignore_on_trash=True)
         log = frappe.get_doc({
             "doctype": "PayFast Payment Log",
             "m_payment_id": m_payment_id,
@@ -361,6 +372,73 @@ class TestITN(FrappeTestCase):
                 payload = _itn_payload(log, passphrase="testpass", payment_status="FAILED")
                 self._process(log, payload)
                 mock_pub.assert_not_called()
+
+    def test_claim_for_retry_rejects_already_settled_log(self):
+        log = self._make_log(m_payment_id="PFM-RETRY-CLAIM-1", status="ERP Sync Failed")
+        self.assertTrue(itn_service._claim_for_retry(log.name))
+        # Simulate a concurrent delivery having already completed it since the
+        # scheduler listed it.
+        frappe.db.set_value("PayFast Payment Log", log.name, "processed", 1)
+        self.assertFalse(itn_service._claim_for_retry(log.name))
+
+    def test_claim_for_retry_rejects_wrong_status(self):
+        log = self._make_log(m_payment_id="PFM-RETRY-CLAIM-2", status="Manual Review")
+        self.assertFalse(itn_service._claim_for_retry(log.name))
+
+    def test_source_valid_scoped_by_environment(self):
+        """Sandbox merchants must not trust the live notify hosts and vice
+        versa -- each environment only trusts its own PayFast host names."""
+        self.assertTrue(itn_service._source_valid("sandbox.payfast.co.za", [], "Sandbox"))
+        self.assertFalse(itn_service._source_valid("sandbox.payfast.co.za", [], "Live"))
+        self.assertTrue(itn_service._source_valid("www.payfast.co.za", [], "Live"))
+        self.assertFalse(itn_service._source_valid("www.payfast.co.za", [], "Sandbox"))
+        # No environment supplied falls back to the full historical set (2-arg callers).
+        self.assertTrue(itn_service._source_valid("sandbox.payfast.co.za", []))
+        self.assertTrue(itn_service._source_valid("www.payfast.co.za", []))
+        # Operator-configured allowed hosts are always honoured regardless of environment.
+        self.assertTrue(itn_service._source_valid("custom.example.com", ["custom.example.com"], "Live"))
+
+    def test_move_to_review_sends_manual_review_notification(self):
+        with patch.object(itn_service, "notify_manual_review") as mock_notify:
+            with patch.object(itn_service, "_server_validate", return_value=(True, {})):
+                log = self._make_log(m_payment_id="PFM-NOTIFY-REVIEW")
+                payload = _itn_payload(log, passphrase="testpass")
+                payload["signature"] = "deadbeef" * 4
+                self._process(log, payload)
+                mock_notify.assert_called_once()
+                self.assertEqual(mock_notify.call_args[0][0].name, log.name)
+
+    def test_erp_sync_escalation_sends_manual_review_notification(self):
+        with patch.object(itn_service, "notify_manual_review") as mock_notify:
+            log = self._make_log(m_payment_id="PFM-NOTIFY-ESCALATE")
+            log.retry_count = itn_service.MAX_ERP_RETRIES - 1
+            log.save(ignore_permissions=True)
+            itn_service._flag_erp_sync_failed(log, Exception("boom"))
+            self.assertEqual(log.status, "Manual Review")
+            mock_notify.assert_called_once()
+
+    def test_erp_sync_non_final_retry_does_not_notify(self):
+        with patch.object(itn_service, "notify_manual_review") as mock_notify:
+            log = self._make_log(m_payment_id="PFM-NOTIFY-NOESCALATE")
+            itn_service._flag_erp_sync_failed(log, Exception("boom"))
+            self.assertEqual(log.status, "ERP Sync Failed")
+            mock_notify.assert_not_called()
+
+    def test_notify_manual_review_sends_email_to_system_managers(self):
+        with patch.object(itn_service, "_get_system_manager_emails", return_value=["admin@example.com"]):
+            with patch.object(frappe, "sendmail") as mock_mail:
+                log = self._make_log(m_payment_id="PFM-NOTIFY-SEND")
+                itn_service.notify_manual_review(log, "test reason")
+                mock_mail.assert_called_once()
+                kwargs = mock_mail.call_args.kwargs
+                self.assertEqual(kwargs["recipients"], ["admin@example.com"])
+                self.assertIn(log.name, kwargs["subject"])
+
+    def test_notify_manual_review_never_raises_on_failure(self):
+        with patch.object(itn_service, "_get_system_manager_emails", side_effect=Exception("boom")):
+            log = self._make_log(m_payment_id="PFM-NOTIFY-FAIL")
+            # Must never raise -- a notification failure must not affect ITN processing.
+            itn_service.notify_manual_review(log, "test reason")
 
     def test_server_validate_posts_raw_body(self):
         raw_body = "m_payment_id=PFM-1&payment_status=COMPLETE&signature=abc"
