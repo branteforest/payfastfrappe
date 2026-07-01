@@ -1,6 +1,6 @@
 import frappe
 from frappe.model.document import Document
-from frappe.utils import cint
+from frappe.utils import cint, get_url
 
 
 class PayFastSettings(Document):
@@ -56,3 +56,20 @@ def get_credentials():
 def get_allowed_source_hosts():
     raw = get_settings().allowed_source_hosts or ""
     return [h.strip() for h in raw.splitlines() if h.strip()]
+
+
+def get_notify_url(settings=None):
+    s = settings or get_settings()
+    return s.notify_url or get_url(
+        "/api/method/payfast_gateway.payfast_gateway.api.payfast_itn"
+    )
+
+
+def get_return_url(settings=None):
+    s = settings or get_settings()
+    return s.return_url or get_url("/pf-return")
+
+
+def get_cancel_url(settings=None):
+    s = settings or get_settings()
+    return s.cancel_url or get_url("/pf-cancel")

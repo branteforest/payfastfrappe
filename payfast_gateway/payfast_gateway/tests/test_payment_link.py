@@ -14,6 +14,8 @@ class TestPaymentLink(FrappeTestCase):
             "sandbox_merchant_key": self.settings.sandbox_merchant_key,
             "sandbox_passphrase": self.settings.sandbox_passphrase,
             "notify_url": self.settings.notify_url,
+            "return_url": self.settings.return_url,
+            "cancel_url": self.settings.cancel_url,
             "currency": self.settings.currency,
             "enabled": self.settings.enabled,
         }

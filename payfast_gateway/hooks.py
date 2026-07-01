@@ -22,6 +22,7 @@ scheduler_events = {
         # creation previously failed (status "ERP Sync Failed").
         "*/10 * * * *": [
             "payfast_gateway.payfast_gateway.services.itn.retry_erp_sync",
+            "payfast_gateway.payfast_gateway.services.expiry.expire_stale_links",
         ],
     },
 }

@@ -3,8 +3,9 @@ import json
 import frappe
 
 from payfast_gateway.payfast_gateway.doctype.payfast_settings.payfast_settings import (
-    get_settings,
+    get_credentials,
 )
+from payfast_gateway.payfast_gateway.services.itn import _update_reference_payfast_status
 
 
 def get_context(context):
@@ -29,13 +30,15 @@ def get_context(context):
     if log.expires_at and log.expires_at < frappe.utils.now_datetime():
         if log.status == "Awaiting Payment":
             frappe.db.set_value("PayFast Payment Log", log.name, "status", "Cancelled")
+            _update_reference_payfast_status(
+                log.reference_doctype, log.reference_docname, "Cancelled"
+            )
             frappe.db.commit()
         context.error = "This payment link has expired."
         context.show_form = False
         return context
 
     payload = json.loads(log.request_payload_json or "{}")
-    # Drop testing from the posted form only if sandbox; signature already excludes it.
     fields = []
     for name, value in payload.items():
         if name in ("signature",):
@@ -44,7 +47,7 @@ def get_context(context):
     fields.append(("signature", log.signature))
 
     context.fields = fields
-    context.process_url = log.process_url or get_settings().live_process_url
+    context.process_url = log.process_url or get_credentials()["process_url"]
     context.amount = log.amount
     context.m_payment_id = log.m_payment_id
     context.show_form = True

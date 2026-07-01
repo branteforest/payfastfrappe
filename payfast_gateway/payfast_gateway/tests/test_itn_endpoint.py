@@ -163,6 +163,7 @@ class TestITNEndpoint(FrappeTestCase):
             itn_service.process_itn(
                 log_name=kwargs.get("log_name"),
                 raw_payload_json=kwargs.get("raw_payload_json"),
+                raw_body=kwargs.get("raw_body"),
                 source_host=kwargs.get("source_host"),
             )
         return runner

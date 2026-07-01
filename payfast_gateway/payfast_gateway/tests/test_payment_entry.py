@@ -151,6 +151,64 @@ class TestPaymentEntry(FrappeTestCase):
         si = frappe.get_doc("Sales Invoice", self.si_name)
         self.assertEqual(si.status, "Paid")
 
+    def test_stale_draft_pe_is_submitted_on_retry_not_falsely_marked_paid(self):
+        """If a prior run inserted the Payment Entry but submit() failed, the log
+        must NOT be marked Complete with an unsubmitted PE. The retry must submit
+        the stale draft and never create a second Payment Entry.
+        """
+        from frappe.model.document import Document
+
+        log = _make_log()
+        log.reference_docname = self.si_name
+        log.customer = self.customer
+        log.save(ignore_permissions=True)
+
+        payload = {
+            "m_payment_id": log.m_payment_id,
+            "pf_payment_id": "PF12345",
+            "payment_status": "COMPLETE",
+            "amount_gross": "100.00",
+            "amount_fee": "0.00",
+            "amount_net": "100.00",
+            "merchant_id": "10000100",
+            "item_name": "Test",
+        }
+        items = [(k, v) for k, v in payload.items()]
+        payload["signature"] = generate_signature(items, "testpass")
+        raw = json.dumps(payload)
+
+        orig_submit = Document.submit
+        state = {"failed_once": False}
+
+        def flaky_submit(doc, *a, **k):
+            if doc.doctype == "Payment Entry" and not state["failed_once"]:
+                state["failed_once"] = True
+                raise frappe.ValidationError("simulated submit failure")
+            return orig_submit(doc, *a, **k)
+
+        # First delivery: insert succeeds, submit fails -> ERP Sync Failed + a draft PE.
+        with patch.object(itn_service, "_server_validate", return_value=(True, {"status": "VALID"})), \
+                patch.object(Document, "submit", flaky_submit):
+            itn_service.process_itn(log.name, raw_payload_json=raw, source_host="www.payfast.co.za")
+
+        log.reload()
+        self.assertEqual(log.status, "ERP Sync Failed")
+        self.assertFalse(log.processed)
+        drafts = frappe.get_all("Payment Entry", {"reference_no": "PF12345", "docstatus": 0}, pluck="name")
+        self.assertEqual(len(drafts), 1)
+
+        # Retry: the stale draft must be submitted, not treated as done.
+        itn_service.retry_erp_sync()
+
+        log.reload()
+        self.assertEqual(log.status, "Complete")
+        self.assertTrue(log.processed)
+        self.assertTrue(log.payment_entry)
+        pe = frappe.get_doc("Payment Entry", log.payment_entry)
+        self.assertEqual(pe.docstatus, 1)
+        # Exactly one Payment Entry for this payment (no duplicate created on retry).
+        self.assertEqual(frappe.db.count("Payment Entry", {"reference_no": "PF12345"}), 1)
+
     def test_itn_only_marks_paid_after_all_checks(self):
         log = _make_log()
         log.reference_docname = self.si_name

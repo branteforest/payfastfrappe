@@ -38,7 +38,7 @@ _DNS_CACHE = {}
 _DNS_TTL = 300  # seconds
 
 
-def process_itn(log_name, raw_payload_json=None, source_host=None):
+def process_itn(log_name, raw_payload_json=None, source_host=None, raw_body=None):
     """Background ITN processor enforcing the mandatory 4 checks.
 
     Idempotent: claims the log under a short row lock, performs the network
@@ -63,6 +63,8 @@ def process_itn(log_name, raw_payload_json=None, source_host=None):
 
     if not raw_payload_json:
         raw_payload_json = log.raw_payload_json
+    if not raw_body:
+        raw_body = log.get("raw_itn_body") or ""
 
     try:
         payload = json.loads(raw_payload_json or "{}")
@@ -103,7 +105,7 @@ def process_itn(log_name, raw_payload_json=None, source_host=None):
     )
 
     # Check 4: server-to-server validate POST returns VALID (network I/O, no lock held).
-    server_valid, validate_response = _server_validate(payload, creds)
+    server_valid, validate_response = _server_validate(raw_body, creds)
 
     _debug(
         settings,
@@ -257,13 +259,23 @@ def _source_valid(source_host, allowed_hosts):
     return False
 
 
-def _server_validate(payload, creds):
-    """Server-to-server POST to PayFast validate URL. Must return 'VALID'."""
+def _server_validate(raw_body, creds):
+    """Server-to-server POST to PayFast validate URL. Must return 'VALID'.
+
+    Posts the original form-encoded body when available (spec §9).
+    """
     validate_url = creds.get("validate_url")
     if not validate_url:
         return False, {"error": "no validate_url configured"}
+    if not raw_body:
+        return False, {"error": "no raw ITN body available for server validate"}
     try:
-        resp = requests.post(validate_url, data=payload, timeout=30)
+        resp = requests.post(
+            validate_url,
+            data=raw_body,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=30,
+        )
     except Exception as exc:  # noqa: BLE001 - network errors must be caught
         return False, {"error": f"validate request failed: {exc}"}
     text = (resp.text or "").strip().upper()
@@ -276,14 +288,11 @@ def _server_validate(payload, creds):
 
 
 def _complete_payment(log, payload):
-    # v1 accounting path: only a submitted Sales Invoice yields an automatic,
-    # fully-allocated Payment Entry. Anything else is escalated rather than
-    # producing a submitted-but-unallocated (or unconfirmed) Payment Entry.
-    if log.reference_doctype != "Sales Invoice":
+    if log.reference_doctype not in ("Sales Invoice", "Sales Order"):
         _move_to_review(
             log,
             f"reference_doctype '{log.reference_doctype}' is not supported for automatic "
-            "Payment Entry in v1 (Sales Invoice only).",
+            "Payment Entry.",
         )
         return
     if not log.reference_docname:
@@ -299,15 +308,29 @@ def _complete_payment(log, payload):
         )
         return
 
-    # Guard against duplicate Payment Entry creation.
-    existing_pe = None
+    # Guard against duplicate Payment Entry creation. Only a *submitted* Payment
+    # Entry (docstatus == 1) counts as a completed sync. A stale draft
+    # (docstatus == 0) can be left behind when a prior run's insert() succeeded
+    # but submit() failed; it must be submitted rather than treated as done, and
+    # must never trigger creation of a second Payment Entry for the same payment.
+    submitted_pe = None
+    stale_draft_pe = None
     if log.pf_payment_id:
-        existing_pe = frappe.db.get_value(
-            "Payment Entry", {"reference_no": log.pf_payment_id, "docstatus": ["<", 2]}
+        submitted_pe = frappe.db.get_value(
+            "Payment Entry", {"reference_no": log.pf_payment_id, "docstatus": 1}
         )
+        if not submitted_pe:
+            stale_draft_pe = frappe.db.get_value(
+                "Payment Entry", {"reference_no": log.pf_payment_id, "docstatus": 0}
+            )
 
     try:
-        pe_name = existing_pe or _create_payment_entry(log)
+        if submitted_pe:
+            pe_name = submitted_pe
+        elif stale_draft_pe:
+            pe_name = _submit_existing_payment_entry(stale_draft_pe)
+        else:
+            pe_name = _create_payment_entry(log)
         _mark_complete(log, pe_name)
     except Exception as exc:  # noqa: BLE001 - verified payment: retry, do not lose it
         _flag_erp_sync_failed(log, exc)
@@ -330,6 +353,21 @@ def _mark_complete(log, pe_name):
     if not log.paid_at:
         log.paid_at = now_datetime()
     log.save(ignore_permissions=True)
+    _publish_paid_event(log)
+
+
+def _publish_paid_event(log):
+    """Notify agent layer that a verified payment is complete."""
+    frappe.publish_realtime(
+        "payfast_payment_confirmed",
+        {
+            "payment_log": log.name,
+            "reference_doctype": log.reference_doctype,
+            "reference_name": log.reference_docname,
+            "customer_mobile": log.customer_mobile,
+            "conversation_id": log.whatsapp_conversation_id,
+        },
+    )
 
 
 def _flag_erp_sync_failed(log, exc):
@@ -371,18 +409,50 @@ def retry_erp_sync():
             frappe.log_error(title=f"PayFast ITN retry failed: {name}", message=str(exc))
 
 
+def _submit_existing_payment_entry(pe_name):
+    """Submit a stale draft Payment Entry left over from a prior run whose
+    insert() succeeded but submit() failed. Idempotent: reuses the existing
+    document so no second Payment Entry is created for the same pf_payment_id.
+    """
+    pe = frappe.get_doc("Payment Entry", pe_name)
+    if pe.docstatus == 0:
+        pe.submit()
+    return pe.name
+
+
 def _create_payment_entry(log):
+    settings = get_settings()
+    reference_no = log.pf_payment_id or log.m_payment_id
+
+    try:
+        from erpnext.accounts.doctype.payment_entry.payment_entry import get_payment_entry
+
+        pe = get_payment_entry(log.reference_doctype, log.reference_docname)
+        pe.mode_of_payment = settings.mode_of_payment
+        if settings.clearing_account:
+            pe.paid_to = settings.clearing_account
+        pe.reference_no = reference_no
+        pe.reference_date = now_datetime().date()
+        pe.remark = f"PayFast payment {reference_no}"
+        pe.insert(ignore_permissions=True)
+        pe.submit()
+        return pe.name
+    except ImportError:
+        return _create_payment_entry_manual(log)
+
+
+def _create_payment_entry_manual(log):
+    """Fallback when ERPNext is not installed (tests without erpnext)."""
     settings = get_settings()
     reference = frappe.get_doc(log.reference_doctype, log.reference_docname)
 
     party = log.customer or getattr(reference, "customer", None)
-    party_type = "Customer"
     if not party:
         frappe.throw(_("Cannot create Payment Entry without a customer."))
 
     pe = frappe.new_doc("Payment Entry")
     pe.payment_entry_type = "Receive"
-    pe.party_type = party_type
+    pe.party_type = "Customer"
     pe.party = party
     pe.company = getattr(reference, "company", None) or frappe.defaults.get_user_default("Company")
     pe.paid_amount = flt(log.amount)
@@ -393,7 +463,6 @@ def _create_payment_entry(log):
     pe.reference_date = now_datetime().date()
     pe.remark = f"PayFast payment {log.pf_payment_id or log.m_payment_id}"
 
-    # Allocate against the Sales Invoice (guaranteed submitted by _complete_payment).
     if log.reference_doctype == "Sales Invoice" and reference.docstatus == 1:
         pe.append(
             "references",
@@ -412,15 +481,24 @@ def _create_payment_entry(log):
 
 
 def _confirm_reference(log):
-    if log.reference_doctype != "Sales Invoice":
+    if log.reference_doctype == "Sales Invoice":
+        si = frappe.get_doc("Sales Invoice", log.reference_docname)
+        si.db_set("status", "Paid" if flt(si.outstanding_amount) <= 0.01 else "Partly Paid")
+        _update_reference_payfast_status("Sales Invoice", log.reference_docname, "Complete", log.name)
+        si.notify_update()
+
+
+def _update_reference_payfast_status(reference_doctype, reference_docname, status, payment_log=None):
+    """Set payfast_status on Sales Invoice when the custom field exists."""
+    if reference_doctype != "Sales Invoice" or not reference_docname:
         return
-    si = frappe.get_doc("Sales Invoice", log.reference_docname)
-    si.db_set("status", "Paid" if flt(si.outstanding_amount) <= 0.01 else "Partly Paid")
-    if si.meta.has_field("payfast_status"):
-        si.db_set("payfast_status", "Complete")
-    if si.meta.has_field("payfast_payment_log"):
-        si.db_set("payfast_payment_log", log.name)
-    si.notify_update()
+    if not frappe.db.exists("Sales Invoice", reference_docname):
+        return
+    meta = frappe.get_meta("Sales Invoice")
+    if meta.has_field("payfast_status"):
+        frappe.db.set_value("Sales Invoice", reference_docname, "payfast_status", status)
+    if payment_log and meta.has_field("payfast_payment_log"):
+        frappe.db.set_value("Sales Invoice", reference_docname, "payfast_payment_log", payment_log)
 
 
 def _move_to_review(log, reason):

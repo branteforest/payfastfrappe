@@ -136,19 +136,21 @@
    "fieldname": "return_url",
    "fieldtype": "Data",
    "label": "Return URL (success)",
+   "description": "Leave blank to auto-default to /pf-return on this site.",
    "length": 255
   },
   {
    "fieldname": "cancel_url",
    "fieldtype": "Data",
    "label": "Cancel URL",
+   "description": "Leave blank to auto-default to /pf-cancel on this site.",
    "length": 255
   },
   {
    "fieldname": "notify_url",
    "fieldtype": "Data",
    "label": "Notify URL (ITN)",
-   "reqd": 1,
+   "description": "Leave blank to auto-default to this site's ITN API method URL.",
    "length": 255
   },
   {

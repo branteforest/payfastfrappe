@@ -7,10 +7,14 @@ from frappe import _
 from frappe.utils import add_to_date, cint, flt, now_datetime
 
 from payfast_gateway.payfast_gateway.doctype.payfast_settings.payfast_settings import (
+    get_cancel_url,
     get_credentials,
+    get_notify_url,
+    get_return_url,
     get_settings,
     is_enabled,
 )
+from payfast_gateway.payfast_gateway.services.itn import _update_reference_payfast_status
 from payfast_gateway.payfast_gateway.services.signature import (
     REDIRECT_FIELD_ORDER,
     generate_signature,
@@ -32,6 +36,9 @@ ALLOWED_REFERENCE_DOCTYPES = ("Sales Invoice", "Sales Order")
 ITN_RATE_LIMIT = 120
 ITN_RATE_WINDOW = 60
 
+# Internal log statuses that must not be regenerated while ITN may be in flight.
+NON_REGENERABLE_STATUSES = ("Complete", "ERP Sync Failed", "Processing")
+
 
 def _require_agent():
     if frappe.session.user == "Administrator":
@@ -51,6 +58,51 @@ def _validate_amount(amount):
     return amount
 
 
+def _validate_amount_against_reference(reference_doctype, ref, amount):
+    if reference_doctype == "Sales Invoice":
+        outstanding = flt(getattr(ref, "outstanding_amount", 0))
+        if amount > outstanding + 0.01:
+            frappe.throw(
+                _("Amount {0} cannot exceed outstanding amount {1}.").format(amount, outstanding)
+            )
+
+
+def _sync_reference_payfast_status(reference_doctype, reference_docname, payfast_status, payment_log=None):
+    _update_reference_payfast_status(
+        reference_doctype, reference_docname, payfast_status, payment_log=payment_log
+    )
+
+
+def _normalize_payment_status(log_status, expires_at=None):
+    """Map internal log status to agent-facing lowercase lifecycle."""
+    if log_status == "Complete":
+        return "paid"
+    if log_status in ("Failed", "Cancelled"):
+        if log_status == "Cancelled" and expires_at and expires_at < now_datetime():
+            return "expired"
+        return "failed"
+    if log_status in ("Manual Review", "ERP Sync Failed"):
+        return "manual_review"
+    return "awaiting_payment"
+
+
+def _normalize_booking_status(log_status, expires_at=None):
+    normalized = _normalize_payment_status(log_status, expires_at)
+    if normalized == "paid":
+        return "confirmed"
+    if normalized in ("failed", "expired"):
+        return "cancelled"
+    return "awaiting_payment"
+
+
+def _resolve_m_payment_id(m_payment_id=None, payment_log=None):
+    if payment_log and not m_payment_id:
+        m_payment_id = frappe.db.get_value("PayFast Payment Log", payment_log, "m_payment_id")
+    if not m_payment_id:
+        frappe.throw(_("m_payment_id or payment_log is required."))
+    return m_payment_id
+
+
 def _build_redirect_payload(log, creds, customer_doc=None):
     """Build the ordered PayFast redirect fields + signature.
 
@@ -64,9 +116,9 @@ def _build_redirect_payload(log, creds, customer_doc=None):
     fields = {
         "merchant_id": creds["merchant_id"],
         "merchant_key": creds["merchant_key"],
-        "return_url": settings.return_url or "",
-        "cancel_url": settings.cancel_url or "",
-        "notify_url": settings.notify_url,
+        "return_url": get_return_url(settings),
+        "cancel_url": get_cancel_url(settings),
+        "notify_url": get_notify_url(settings),
         "name_first": log.name_first or "",
         "name_last": log.name_last or "",
         "email_address": log.email_address or "",
@@ -151,6 +203,8 @@ def create_payment_link(reference_doctype="Sales Invoice", reference_name=None,
     if customer and hasattr(ref, "customer") and ref.customer and ref.customer != customer:
         frappe.throw(_("Customer mismatch with reference document."))
 
+    _validate_amount_against_reference(reference_doctype, ref, amount)
+
     existing = frappe.db.get_value(
         "PayFast Payment Log",
         {
@@ -168,6 +222,7 @@ def create_payment_link(reference_doctype="Sales Invoice", reference_name=None,
         if expired:
             # Don't hand back an already-expired link; retire it and mint a new one.
             frappe.db.set_value("PayFast Payment Log", existing.name, "status", "Cancelled")
+            _sync_reference_payfast_status(reference_doctype, reference_name, "Cancelled")
         else:
             reuse = True
 
@@ -194,6 +249,9 @@ def create_payment_link(reference_doctype="Sales Invoice", reference_name=None,
         log.request_payload_json = json.dumps(payload_form, ensure_ascii=False)
         log.signature = signature
         log.save(ignore_permissions=True)
+        _sync_reference_payfast_status(
+            reference_doctype, reference_name, "Awaiting Payment", payment_log=log.name
+        )
         log_name = log.name
         token = log.redirect_token
         expires_at = log.expires_at
@@ -228,32 +286,45 @@ def get_payment_status(m_payment_id=None, payment_log=None):
     if not row:
         frappe.throw(_("No payment request found."))
 
-    booking_status = None
+    reference_doc_status = None
     if row.reference_doctype and row.reference_docname and frappe.db.exists(
         row.reference_doctype, row.reference_docname
     ):
-        booking_status = frappe.db.get_value(row.reference_doctype, row.reference_docname, "status")
+        reference_doc_status = frappe.db.get_value(
+            row.reference_doctype, row.reference_docname, "status"
+        )
+
+    normalized_payment_status = _normalize_payment_status(row.status, row.expires_at)
+    normalized_booking_status = _normalize_booking_status(row.status, row.expires_at)
 
     row["ok"] = True
     row["payment_log"] = row["name"]
-    row["booking_status"] = booking_status
+    row["reference_name"] = row.reference_docname
+    row["booking_status"] = normalized_booking_status
+    row["reference_doc_status"] = reference_doc_status
+    row["normalized_payment_status"] = normalized_payment_status
+    row["payfast_payment_status"] = row.payment_status
+    row["payment_status"] = normalized_payment_status
     return row
 
 
 @frappe.whitelist(methods=["POST"])
-def regenerate_payment_link(m_payment_id, amount=None):
+def regenerate_payment_link(m_payment_id=None, payment_log=None, amount=None):
     _require_agent()
+    m_payment_id = _resolve_m_payment_id(m_payment_id, payment_log)
     existing_name = frappe.db.get_value("PayFast Payment Log", {"m_payment_id": m_payment_id})
     if not existing_name:
         frappe.throw(_("No payment request found for {0}").format(m_payment_id))
     existing = frappe.get_doc("PayFast Payment Log", existing_name)
-    if existing.status in ("Complete", "ERP Sync Failed"):
-        # A verified payment (synced or pending ERP retry) must not be regenerated.
-        frappe.throw(_("Cannot regenerate a payment that has already been verified."))
+    if existing.status in NON_REGENERABLE_STATUSES:
+        frappe.throw(_("Cannot regenerate a payment that has already been verified or is processing."))
     # Cancel the old awaiting attempt.
     if existing.status == "Awaiting Payment":
         existing.status = "Cancelled"
         existing.save(ignore_permissions=True)
+        _sync_reference_payfast_status(
+            existing.reference_doctype, existing.reference_docname, "Cancelled"
+        )
     amount = _validate_amount(amount or existing.amount)
     return create_payment_link(
         reference_doctype=existing.reference_doctype,
@@ -273,8 +344,9 @@ def regenerate_payment_link(m_payment_id, amount=None):
 
 
 @frappe.whitelist(methods=["POST"])
-def cancel_payment_request(m_payment_id, reason=None):
+def cancel_payment_request(m_payment_id=None, payment_log=None, reason=None):
     _require_agent()
+    m_payment_id = _resolve_m_payment_id(m_payment_id, payment_log)
     name = frappe.db.get_value("PayFast Payment Log", {"m_payment_id": m_payment_id})
     if not name:
         frappe.throw(_("No payment request found for {0}").format(m_payment_id))
@@ -286,6 +358,7 @@ def cancel_payment_request(m_payment_id, reason=None):
         log.review_reason = reason
         log.error_log = (log.error_log or "") + f"\n[{now_datetime()}] cancelled: {reason}"
     log.save(ignore_permissions=True)
+    _sync_reference_payfast_status(log.reference_doctype, log.reference_docname, "Cancelled")
     return {"ok": True, "m_payment_id": m_payment_id, "payment_log": name, "status": "Cancelled"}
 
 
@@ -299,7 +372,7 @@ def payfast_itn():
     or unexpected errors. Raw payload is stored BEFORE any verification.
     """
     try:
-        ordered, raw = _parse_raw_itn()
+        ordered, raw, body = _parse_raw_itn()
         client_ip = _get_client_ip()
         source_meta = _source_meta(client_ip)
         raw_json = json.dumps(raw, ensure_ascii=False)
@@ -312,9 +385,9 @@ def payfast_itn():
             log_name = frappe.db.get_value("PayFast Payment Log", {"m_payment_id": m_payment_id})
 
         if log_name:
-            _store_raw_on_existing(log_name, raw, raw_json, client_ip, source_meta, pf_payment_id)
+            _store_raw_on_existing(log_name, raw, raw_json, body, client_ip, source_meta, pf_payment_id)
         else:
-            _store_unknown_itn(m_payment_id, raw, raw_json, client_ip, source_meta, pf_payment_id)
+            _store_unknown_itn(m_payment_id, raw, raw_json, body, client_ip, source_meta, pf_payment_id)
             # Unknown reference: audited only, never processed into a Payment Entry.
             return "OK"
 
@@ -332,6 +405,7 @@ def payfast_itn():
             timeout=600,
             log_name=log_name,
             raw_payload_json=raw_json,
+            raw_body=body,
             source_host=client_ip,
         )
     except Exception:  # noqa: BLE001 - the ITN endpoint must always ack with 200
@@ -367,7 +441,7 @@ def _parse_raw_itn():
     for k, v in ordered:
         if k not in raw:
             raw[k] = v
-    return ordered, raw
+    return ordered, raw, body
 
 
 def _is_public_ip(value):
@@ -434,7 +508,7 @@ def _append_audit(audit_json, raw, source_meta):
     return audit
 
 
-def _store_raw_on_existing(log_name, raw, raw_json, client_ip, source_meta, pf_payment_id):
+def _store_raw_on_existing(log_name, raw, raw_json, raw_body, client_ip, source_meta, pf_payment_id):
     """Store the raw ITN on an existing log without corrupting JSON parsing.
 
     The latest raw body is kept as a single valid JSON object in
@@ -447,6 +521,7 @@ def _store_raw_on_existing(log_name, raw, raw_json, client_ip, source_meta, pf_p
     audit = _append_audit(audit_json, raw, source_meta)
     updates = {
         "raw_payload_json": raw_json,
+        "raw_itn_body": raw_body or "",
         "raw_payload_audit_json": json.dumps(audit, ensure_ascii=False),
         "source_host": client_ip or (source_meta.get("host") or "unknown"),
     }
@@ -461,7 +536,7 @@ def _store_raw_on_existing(log_name, raw, raw_json, client_ip, source_meta, pf_p
         frappe.db.commit()
 
 
-def _store_unknown_itn(m_payment_id, raw, raw_json, client_ip, source_meta, pf_payment_id):
+def _store_unknown_itn(m_payment_id, raw, raw_json, raw_body, client_ip, source_meta, pf_payment_id):
     """Store an ITN with no matching m_payment_id for manual review, guarding
     against unique-key collisions, and raise an admin alert."""
     audit = _append_audit(None, raw, source_meta)
@@ -475,6 +550,7 @@ def _store_unknown_itn(m_payment_id, raw, raw_json, client_ip, source_meta, pf_p
         "amount": flt(raw.get("amount_gross") or 0),
         "currency": "ZAR",
         "raw_payload_json": raw_json,
+        "raw_itn_body": raw_body or "",
         "raw_payload_audit_json": json.dumps(audit, ensure_ascii=False),
         "source_host": client_ip or (source_meta.get("host") or "unknown"),
         "pf_payment_id": pf_payment_id,
@@ -491,7 +567,7 @@ def _store_unknown_itn(m_payment_id, raw, raw_json, client_ip, source_meta, pf_p
         frappe.db.rollback(save_point="pf_unknown_itn")
         existing = frappe.db.get_value("PayFast Payment Log", {"m_payment_id": generated})
         if existing:
-            _store_raw_on_existing(existing, raw, raw_json, client_ip, source_meta, pf_payment_id)
+            _store_raw_on_existing(existing, raw, raw_json, raw_body, client_ip, source_meta, pf_payment_id)
             name = existing
         else:
             raise

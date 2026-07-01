@@ -9,7 +9,7 @@ description = "PayFast hosted-redirect + ITN integration for Frappe/ERPNext (Sal
 readme = "README.md"
 requires-python = ">=3.10"
 dynamic = ["version"]
-dependencies = ["frappe"]
+dependencies = ["frappe", "requests"]
 
 [tool.flit.module]
 name = "payfast_gateway"

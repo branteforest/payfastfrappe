@@ -193,6 +193,13 @@
    "label": "ITN"
   },
   {
+   "fieldname": "raw_itn_body",
+   "fieldtype": "Long Text",
+   "label": "Latest Raw ITN Body (form-encoded)",
+   "read_only": 1,
+   "permlevel": 1
+  },
+  {
    "fieldname": "raw_payload_json",
    "fieldtype": "Code",
    "label": "Latest Raw ITN Payload JSON",

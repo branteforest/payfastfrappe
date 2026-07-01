@@ -1,5 +1,6 @@
 import json
 from unittest.mock import patch
+from urllib.parse import urlencode
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
@@ -118,9 +119,11 @@ class TestITN(FrappeTestCase):
         return log
 
     def _process(self, log, payload, source_host="www.payfast.co.za"):
+        raw_body = urlencode([(k, v) for k, v in payload.items()])
         itn_service.process_itn(
             log.name,
             raw_payload_json=json.dumps(payload),
+            raw_body=raw_body,
             source_host=payload.get("source_host") or source_host,
         )
         return frappe.get_doc("PayFast Payment Log", log.name)
