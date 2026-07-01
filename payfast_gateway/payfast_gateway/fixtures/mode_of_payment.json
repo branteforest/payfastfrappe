@@ -1,0 +1,8 @@
+[
+  {
+    "doctype": "Mode of Payment",
+    "name": "PayFast",
+    "mode_of_payment": "PayFast",
+    "enabled": 1
+  }
+]

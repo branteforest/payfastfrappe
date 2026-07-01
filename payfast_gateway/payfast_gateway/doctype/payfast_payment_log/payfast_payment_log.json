@@ -1,0 +1,415 @@
+{
+ "actions": [],
+ "autoname": "PFLOG-.#####",
+ "creation": "2026-07-01 20:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "fields": [
+  {
+   "fieldname": "m_payment_id",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "m_payment_id (merchant reference)",
+   "length": 100,
+   "unique": 1,
+   "set_only_once": 1
+  },
+  {
+   "fieldname": "redirect_token",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Redirect Token",
+   "length": 64,
+   "unique": 1,
+   "reqd": 1,
+   "set_only_once": 1
+  },
+  {
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Status",
+   "options": "Awaiting Payment\nProcessing\nComplete\nFailed\nCancelled\nManual Review\nERP Sync Failed",
+   "default": "Awaiting Payment",
+   "reqd": 1,
+   "read_only": 1,
+   "permlevel": 1
+  },
+  {
+   "fieldname": "processed",
+   "fieldtype": "Check",
+   "label": "Processed",
+   "default": 0,
+   "read_only": 1,
+   "permlevel": 1
+  },
+  {
+   "fieldname": "link_column",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "reference_doctype",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Reference DocType",
+   "options": "Sales Invoice\nSales Order",
+   "default": "Sales Invoice",
+   "set_only_once": 1
+  },
+  {
+   "fieldname": "reference_docname",
+   "fieldtype": "Dynamic Link",
+   "in_list_view": 1,
+   "label": "Reference Document",
+   "options": "reference_doctype",
+   "set_only_once": 1
+  },
+  {
+   "fieldname": "customer",
+   "fieldtype": "Link",
+   "label": "Customer",
+   "options": "Customer",
+   "set_only_once": 1
+  },
+  {
+   "fieldname": "amount",
+   "fieldtype": "Currency",
+   "in_list_view": 1,
+   "label": "Amount",
+   "reqd": 1,
+   "set_only_once": 1
+  },
+  {
+   "fieldname": "currency",
+   "fieldtype": "Link",
+   "label": "Currency",
+   "options": "Currency",
+   "default": "ZAR",
+   "set_only_once": 1
+  },
+  {
+   "fieldname": "payer_section",
+   "fieldtype": "Section Break",
+   "label": "Payer / Item"
+  },
+  {
+   "fieldname": "name_first",
+   "fieldtype": "Data",
+   "label": "First Name",
+   "length": 100,
+   "set_only_once": 1
+  },
+  {
+   "fieldname": "name_last",
+   "fieldtype": "Data",
+   "label": "Last Name",
+   "length": 100,
+   "set_only_once": 1
+  },
+  {
+   "fieldname": "email_address",
+   "fieldtype": "Data",
+   "label": "Email Address",
+   "length": 140,
+   "set_only_once": 1
+  },
+  {
+   "fieldname": "cell_number",
+   "fieldtype": "Data",
+   "label": "Cell Number",
+   "length": 50,
+   "set_only_once": 1
+  },
+  {
+   "fieldname": "customer_mobile",
+   "fieldtype": "Data",
+   "label": "Customer Mobile (WhatsApp)",
+   "length": 50,
+   "set_only_once": 1
+  },
+  {
+   "fieldname": "whatsapp_conversation_id",
+   "fieldtype": "Data",
+   "label": "WhatsApp Conversation ID",
+   "length": 140,
+   "set_only_once": 1
+  },
+  {
+   "fieldname": "payer_column",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "item_name",
+   "fieldtype": "Data",
+   "label": "Item Name",
+   "length": 255,
+   "set_only_once": 1
+  },
+  {
+   "fieldname": "item_description",
+   "fieldtype": "Small Text",
+   "label": "Item Description",
+   "set_only_once": 1
+  },
+  {
+   "fieldname": "request_section",
+   "fieldtype": "Section Break",
+   "label": "Redirect Request"
+  },
+  {
+   "fieldname": "request_payload_json",
+   "fieldtype": "Code",
+   "label": "Request Payload JSON",
+   "options": "JSON",
+   "read_only": 1,
+   "permlevel": 1
+  },
+  {
+   "fieldname": "signature",
+   "fieldtype": "Data",
+   "label": "Generated Signature",
+   "length": 64,
+   "read_only": 1,
+   "permlevel": 1
+  },
+  {
+   "fieldname": "process_url",
+   "fieldtype": "Data",
+   "label": "Process URL",
+   "length": 255,
+   "read_only": 1,
+   "permlevel": 1
+  },
+  {
+   "fieldname": "expires_at",
+   "fieldtype": "Datetime",
+   "label": "Link Expires At",
+   "read_only": 1,
+   "permlevel": 1
+  },
+  {
+   "fieldname": "itn_section",
+   "fieldtype": "Section Break",
+   "label": "ITN"
+  },
+  {
+   "fieldname": "raw_payload_json",
+   "fieldtype": "Code",
+   "label": "Latest Raw ITN Payload JSON",
+   "options": "JSON",
+   "read_only": 1,
+   "permlevel": 1
+  },
+  {
+   "fieldname": "raw_payload_audit_json",
+   "fieldtype": "Long Text",
+   "label": "Raw ITN Payload Audit (append-only JSON array)",
+   "read_only": 1,
+   "permlevel": 1
+  },
+  {
+   "fieldname": "pf_payment_id",
+   "fieldtype": "Data",
+   "label": "PayFast Payment ID (pf_payment_id)",
+   "length": 100,
+   "read_only": 1,
+   "permlevel": 1
+  },
+  {
+   "fieldname": "payment_status",
+   "fieldtype": "Select",
+   "label": "PayFast payment_status",
+   "options": "\nCOMPLETE\nFAILED\nPENDING\nCANCELLED",
+   "read_only": 1,
+   "permlevel": 1
+  },
+  {
+   "fieldname": "payment_gateway",
+   "fieldtype": "Data",
+   "label": "Payment Gateway",
+   "length": 100,
+   "read_only": 1,
+   "permlevel": 1
+  },
+  {
+   "fieldname": "source_host",
+   "fieldtype": "Data",
+   "label": "ITN Source Host / IP",
+   "length": 255,
+   "read_only": 1,
+   "permlevel": 1
+  },
+  {
+   "fieldname": "paid_at",
+   "fieldtype": "Datetime",
+   "label": "Paid At",
+   "read_only": 1,
+   "permlevel": 1
+  },
+  {
+   "fieldname": "amounts_column",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "amount_gross",
+   "fieldtype": "Currency",
+   "label": "Amount Gross (ITN)",
+   "read_only": 1,
+   "permlevel": 1
+  },
+  {
+   "fieldname": "amount_fee",
+   "fieldtype": "Currency",
+   "label": "Amount Fee (ITN)",
+   "read_only": 1,
+   "permlevel": 1
+  },
+  {
+   "fieldname": "amount_net",
+   "fieldtype": "Currency",
+   "label": "Amount Net (ITN)",
+   "read_only": 1,
+   "permlevel": 1
+  },
+  {
+   "fieldname": "checks_column",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "signature_valid",
+   "fieldtype": "Check",
+   "label": "Signature Valid",
+   "default": 0,
+   "read_only": 1,
+   "permlevel": 1
+  },
+  {
+   "fieldname": "source_valid",
+   "fieldtype": "Check",
+   "label": "Source Valid",
+   "default": 0,
+   "read_only": 1,
+   "permlevel": 1
+  },
+  {
+   "fieldname": "amount_valid",
+   "fieldtype": "Check",
+   "label": "Amount Valid",
+   "default": 0,
+   "read_only": 1,
+   "permlevel": 1
+  },
+  {
+   "fieldname": "server_valid",
+   "fieldtype": "Check",
+   "label": "Server Validate VALID",
+   "default": 0,
+   "read_only": 1,
+   "permlevel": 1
+  },
+  {
+   "fieldname": "validate_response",
+   "fieldtype": "Code",
+   "label": "Server Validate Response",
+   "options": "JSON",
+   "read_only": 1,
+   "permlevel": 1
+  },
+  {
+   "fieldname": "payment_entry",
+   "fieldtype": "Link",
+   "label": "Payment Entry",
+   "options": "Payment Entry",
+   "read_only": 1,
+   "permlevel": 1
+  },
+  {
+   "fieldname": "retry_count",
+   "fieldtype": "Int",
+   "label": "ERP Sync Retry Count",
+   "default": 0,
+   "read_only": 1,
+   "permlevel": 1
+  },
+  {
+   "fieldname": "review_section",
+   "fieldtype": "Section Break",
+   "label": "Review / Audit"
+  },
+  {
+   "fieldname": "review_reason",
+   "fieldtype": "Small Text",
+   "label": "Manual Review Reason",
+   "read_only": 1,
+   "permlevel": 1
+  },
+  {
+   "fieldname": "error_log",
+   "fieldtype": "Small Text",
+   "label": "Error / Debug Log",
+   "read_only": 1,
+   "permlevel": 1
+  },
+  {
+   "fieldname": "created_by_link",
+   "fieldtype": "Data",
+   "label": "Created By (Agent)",
+   "length": 140,
+   "read_only": 1,
+   "permlevel": 1
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "list_view": {
+  "order_by": "creation desc"
+ },
+ "modified": "2026-07-01 20:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Payfast Gateway",
+ "name": "PayFast Payment Log",
+ "naming_rule": "Expression (old style)",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "permlevel": 1,
+   "read": 1,
+   "write": 1,
+   "role": "System Manager"
+  },
+  {
+   "create": 1,
+   "delete": 0,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "PayFast Agent",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "permlevel": 1,
+   "read": 1,
+   "write": 0,
+   "role": "PayFast Agent"
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

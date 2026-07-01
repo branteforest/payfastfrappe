@@ -1,0 +1,238 @@
+{
+ "actions": [],
+ "creation": "2026-07-01 20:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "fields": [
+  {
+   "fieldname": "general_section",
+   "fieldtype": "Section Break",
+   "label": "General"
+  },
+  {
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "label": "Enabled (master kill switch)",
+   "default": "1"
+  },
+  {
+   "fieldname": "item_name_prefix",
+   "fieldtype": "Data",
+   "label": "Item Name Prefix",
+   "length": 100
+  },
+  {
+   "fieldname": "general_column",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "enable_debug_logging",
+   "fieldtype": "Check",
+   "label": "Enable Debug Logging",
+   "default": "0"
+  },
+  {
+   "fieldname": "environment_section",
+   "fieldtype": "Section Break",
+   "label": "Environment"
+  },
+  {
+   "fieldname": "environment",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Environment",
+   "options": "Sandbox\nLive",
+   "default": "Sandbox",
+   "reqd": 1
+  },
+  {
+   "fieldname": "sandbox_credentials",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "sandbox_merchant_id",
+   "fieldtype": "Data",
+   "label": "Sandbox Merchant ID",
+   "length": 100
+  },
+  {
+   "fieldname": "sandbox_merchant_key",
+   "fieldtype": "Password",
+   "label": "Sandbox Merchant Key",
+   "length": 255
+  },
+  {
+   "fieldname": "sandbox_passphrase",
+   "fieldtype": "Password",
+   "label": "Sandbox Passphrase",
+   "length": 255
+  },
+  {
+   "fieldname": "live_credentials_section",
+   "fieldtype": "Section Break",
+   "label": "Live Credentials"
+  },
+  {
+   "fieldname": "live_merchant_id",
+   "fieldtype": "Data",
+   "label": "Live Merchant ID",
+   "length": 100
+  },
+  {
+   "fieldname": "live_merchant_key",
+   "fieldtype": "Password",
+   "label": "Live Merchant Key",
+   "length": 255
+  },
+  {
+   "fieldname": "live_passphrase",
+   "fieldtype": "Password",
+   "label": "Live Passphrase",
+   "length": 255
+  },
+  {
+   "fieldname": "urls_section",
+   "fieldtype": "Section Break",
+   "label": "Endpoints"
+  },
+  {
+   "fieldname": "sandbox_process_url",
+   "fieldtype": "Data",
+   "label": "Sandbox Process URL",
+   "default": "https://sandbox.payfast.co.za/eng/process",
+   "length": 255
+  },
+  {
+   "fieldname": "sandbox_validate_url",
+   "fieldtype": "Data",
+   "label": "Sandbox Validate URL",
+   "default": "https://sandbox.payfast.co.za/eng/query/validate",
+   "length": 255
+  },
+  {
+   "fieldname": "column_break_1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "live_process_url",
+   "fieldtype": "Data",
+   "label": "Live Process URL",
+   "default": "https://www.payfast.co.za/eng/process",
+   "length": 255
+  },
+  {
+   "fieldname": "live_validate_url",
+   "fieldtype": "Data",
+   "label": "Live Validate URL",
+   "default": "https://www.payfast.co.za/eng/query/validate",
+   "length": 255
+  },
+  {
+   "fieldname": "routing_section",
+   "fieldtype": "Section Break",
+   "label": "Routing"
+  },
+  {
+   "fieldname": "return_url",
+   "fieldtype": "Data",
+   "label": "Return URL (success)",
+   "length": 255
+  },
+  {
+   "fieldname": "cancel_url",
+   "fieldtype": "Data",
+   "label": "Cancel URL",
+   "length": 255
+  },
+  {
+   "fieldname": "notify_url",
+   "fieldtype": "Data",
+   "label": "Notify URL (ITN)",
+   "reqd": 1,
+   "length": 255
+  },
+  {
+   "fieldname": "accounting_section",
+   "fieldtype": "Section Break",
+   "label": "Accounting"
+  },
+  {
+   "fieldname": "clearing_account",
+   "fieldtype": "Link",
+   "label": "Clearing / Paid To Account",
+   "options": "Account",
+   "reqd": 1
+  },
+  {
+   "fieldname": "mode_of_payment",
+   "fieldtype": "Link",
+   "label": "Mode of Payment",
+   "options": "Mode of Payment",
+   "reqd": 1
+  },
+  {
+   "fieldname": "currency_column",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "currency",
+   "fieldtype": "Link",
+   "label": "Accepted Currency",
+   "options": "Currency",
+   "default": "ZAR",
+   "reqd": 1
+  },
+  {
+   "fieldname": "link_expiry_minutes",
+   "fieldtype": "Int",
+   "label": "Payment Link Expiry (minutes)",
+   "default": "60",
+   "reqd": 1
+  },
+  {
+   "fieldname": "security_section",
+   "fieldtype": "Section Break",
+   "label": "Source Validation"
+  },
+  {
+   "fieldname": "allowed_source_hosts",
+   "fieldtype": "Small Text",
+   "label": "Allowed ITN Source Hosts / IPs (one per line)",
+   "default": "www.payfast.co.za\nsandbox.payfast.co.za"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "issingle": 1,
+ "links": [],
+ "modified": "2026-07-01 20:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Payfast Gateway",
+ "name": "PayFast Settings",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "print": 1,
+   "read": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 0,
+   "delete": 0,
+   "email": 0,
+   "print": 0,
+   "read": 1,
+   "role": "PayFast Agent",
+   "share": 0,
+   "write": 0
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

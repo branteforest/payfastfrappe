@@ -1,0 +1,18 @@
+[build-system]
+requires = ["flit_core >=3.4,<4"]
+build-backend = "flit_core.buildapi"
+
+[project]
+name = "payfast_gateway"
+authors = [{ name = "PayFast Gateway" }]
+description = "PayFast hosted-redirect + ITN integration for Frappe/ERPNext (Sales Invoice-first)."
+readme = "README.md"
+requires-python = ">=3.10"
+dynamic = ["version"]
+dependencies = ["frappe"]
+
+[tool.flit.module]
+name = "payfast_gateway"
+
+[project.urls]
+Homepage = "https://github.com/payfast/payfast_gateway"
