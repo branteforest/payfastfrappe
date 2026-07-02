@@ -112,6 +112,39 @@ class TestPaymentLink(FrappeTestCase):
         self.assertTrue(log.signature)
         self.assertTrue(log.request_payload_json)
 
+    def test_transmitted_payload_matches_signature_basis_exactly(self):
+        """Regression: PayFast returned 400 'Generated signature does not match
+        submitted signature' because blank fields (e.g. email_address for a
+        WhatsApp customer who never gave one) were transmitted in the form but
+        excluded from the signature. The transmitted payload must contain no
+        blank values, no `testing` flag, and recomputing the signature from the
+        transmitted fields (as PayFast does) must reproduce the stored one."""
+        from payfast_gateway.payfast_gateway.services.signature import generate_signature
+
+        result = api.create_payment_link(
+            reference_doctype="Sales Invoice",
+            reference_name=self.si_name,
+            amount=100.00,
+            name_first="Andre",
+            cell_number="0799779906",
+            # no name_last, no email_address, no item_description
+        )
+        log = frappe.get_doc("PayFast Payment Log", result["payment_log"])
+        payload = json.loads(log.request_payload_json)
+
+        self.assertNotIn("testing", payload)
+        for name, value in payload.items():
+            self.assertTrue(
+                str(value).strip(),
+                f"blank field {name!r} must not be transmitted to PayFast",
+            )
+
+        # PayFast regenerates the signature from the received fields in order.
+        received = [(n, v) for n, v in payload.items() if n != "signature"]
+        recomputed = generate_signature(received, "testpass")
+        self.assertEqual(recomputed, payload["signature"])
+        self.assertEqual(recomputed, log.signature)
+
     def test_reference_docname_alias_still_accepted(self):
         result = api.create_payment_link(
             reference_doctype="Sales Invoice",

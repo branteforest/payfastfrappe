@@ -5,7 +5,10 @@ from urllib.parse import quote_plus
 # Field order for the PayFast hosted-redirect request, per the v1 spec.
 # merchant_key IS transmitted to PayFast (over HTTPS) but never logged.
 # passphrase is NEVER transmitted and never logged.
-# The `testing` parameter is sent in test mode but EXCLUDED from the signature.
+# No `testing` parameter exists for the hosted redirect: sandbox vs live is
+# selected purely by the process URL. Only fields listed here may be sent,
+# and only when non-blank, so PayFast's signature regeneration (computed
+# over the fields it receives) always matches ours.
 REDIRECT_FIELD_ORDER = [
     "merchant_id",
     "merchant_key",
