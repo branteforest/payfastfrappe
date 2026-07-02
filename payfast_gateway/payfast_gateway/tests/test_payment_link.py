@@ -21,6 +21,8 @@ class TestPaymentLink(FrappeTestCase):
             "cancel_url": self.settings.cancel_url,
             "currency": self.settings.currency,
             "enabled": self.settings.enabled,
+            "clearing_account": self.settings.clearing_account,
+            "mode_of_payment": self.settings.mode_of_payment,
         }
         self.settings.environment = "Sandbox"
         self.settings.sandbox_merchant_id = "10000100"
@@ -29,6 +31,16 @@ class TestPaymentLink(FrappeTestCase):
         self.settings.notify_url = "https://example.com/api/method/payfast_gateway.payfast_gateway.api.payfast_itn"
         self.settings.currency = "ZAR"
         self.settings.enabled = 1
+        if not self.settings.clearing_account:
+            self.settings.clearing_account = frappe.get_all(
+                "Account", filters={"account_type": "Cash", "is_group": 0}, pluck="name"
+            )[0]
+        if not self.settings.mode_of_payment:
+            if not frappe.db.exists("Mode of Payment", "PayFast"):
+                frappe.get_doc(
+                    {"doctype": "Mode of Payment", "mode_of_payment": "PayFast"}
+                ).insert(ignore_permissions=True)
+            self.settings.mode_of_payment = "PayFast"
         self.settings.save(ignore_permissions=True)
 
         if not frappe.db.exists("Role", "PayFast Agent"):
@@ -40,7 +52,11 @@ class TestPaymentLink(FrappeTestCase):
 
     def tearDown(self):
         frappe.set_user(self._orig_user)
+        self.settings.reload()
         for k, v in self._orig.items():
+            if k in ("clearing_account", "mode_of_payment") and not v:
+                # reqd on the doctype; can't restore to empty on a fresh site.
+                continue
             self.settings.set(k, v)
         try:
             self.settings.save(ignore_permissions=True)
@@ -61,7 +77,11 @@ class TestPaymentLink(FrappeTestCase):
             customer_doc = frappe.get_doc({"doctype": "Customer", "customer_name": "Test Customer"})
             customer_doc.insert(ignore_permissions=True)
             customer = [customer_doc.name]
-        item = frappe.get_all("Item", filters={"is_sales_item": 1}, pluck="name")
+        item = frappe.get_all(
+            "Item",
+            filters={"is_sales_item": 1, "has_variants": 0, "disabled": 0, "is_fixed_asset": 0},
+            pluck="name",
+        )
         if not item:
             item_doc = frappe.get_doc({"doctype": "Item", "item_name": "Test Item", "is_sales_item": 1})
             item_doc.insert(ignore_permissions=True)
@@ -105,7 +125,10 @@ class TestPaymentLink(FrappeTestCase):
             "doctype": "Sales Invoice",
             "customer": frappe.get_all("Customer", pluck="name")[0],
             "company": frappe.defaults.get_user_default("Company"),
-            "items": [{"item_code": frappe.get_all("Item", {"is_sales_item": 1}, pluck="name")[0],
+            "items": [{"item_code": frappe.get_all(
+                           "Item",
+                           {"is_sales_item": 1, "has_variants": 0, "disabled": 0, "is_fixed_asset": 0},
+                           pluck="name")[0],
                        "qty": 1, "rate": 100.00}],
         })
         draft.insert(ignore_permissions=True)

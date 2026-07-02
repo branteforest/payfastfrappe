@@ -139,6 +139,13 @@ def process_itn(log_name, raw_payload_json=None, source_host=None, raw_body=None
     log.source_valid = 1 if source_valid else 0
     log.amount_valid = 1 if amount_valid else 0
     log.server_valid = 1 if server_valid else 0
+    # Persist the raw payload/body onto the log if the receiver didn't already
+    # (e.g. direct enqueue with kwargs); scheduler ERP-sync retries re-read the
+    # payload from the log row and must never find it empty.
+    if raw_payload_json and not log.raw_payload_json:
+        log.raw_payload_json = raw_payload_json
+    if raw_body and not log.get("raw_itn_body"):
+        log.raw_itn_body = raw_body
     log.amount_gross = amount_gross
     log.amount_fee = amount_fee
     log.amount_net = amount_net
@@ -386,6 +393,10 @@ def _mark_complete(log, pe_name):
     log.processed = 1
     if not log.paid_at:
         log.paid_at = now_datetime()
+    # pe_name always comes from a Payment Entry that was just looked up,
+    # submitted, or inserted in this transaction, so re-validating link
+    # existence here adds nothing (and unit tests stub PE creation).
+    log.flags.ignore_links = True
     log.save(ignore_permissions=True)
     _publish_paid_event(log)
 
@@ -409,6 +420,11 @@ def _flag_erp_sync_failed(log, exc):
     increment retry_count, and queue for scheduler retry instead of routing to
     manual review (until attempts are exhausted).
     """
+    # The failed ERP attempt may have died mid-save (e.g. link validation in
+    # _mark_complete), leaving this doc object dirty with a bumped `modified`
+    # stamp. Reload so this save reflects the last persisted state and does not
+    # raise TimestampMismatchError (which would strand the log in 'Processing').
+    log.reload()
     log.retry_count = cint(log.retry_count) + 1
     reason = f"payment verified COMPLETE but ERP update failed (attempt {log.retry_count}): {exc}"
     log.error_log = (log.error_log or "") + f"\n[{now_datetime()}] {reason}"

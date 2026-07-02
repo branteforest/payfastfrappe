@@ -29,6 +29,12 @@ def _itn_payload(log, passphrase="", *, payment_status="COMPLETE",
     return base
 
 
+def _paid_events(mock_pub):
+    """Only the app's own realtime event; doc.save() on a live bench also
+    publishes framework doc_update/list_update events through the same mock."""
+    return [c for c in mock_pub.call_args_list if c.args and c.args[0] == "payfast_payment_confirmed"]
+
+
 class TestITN(FrappeTestCase):
     def setUp(self):
         self.settings = frappe.get_single("PayFast Settings")
@@ -69,7 +75,11 @@ class TestITN(FrappeTestCase):
 
     def tearDown(self):
         frappe.set_user(self._orig_user)
+        self.settings.reload()
         for k, v in self._orig.items():
+            if k in ("clearing_account", "mode_of_payment") and not v:
+                # reqd on the doctype; can't restore to empty on a fresh site.
+                continue
             self.settings.set(k, v)
         try:
             self.settings.save(ignore_permissions=True)
@@ -96,7 +106,11 @@ class TestITN(FrappeTestCase):
         return c.name
 
     def _make_submitted_sales_invoice(self):
-        item = frappe.get_all("Item", filters={"is_sales_item": 1}, pluck="name")
+        item = frappe.get_all(
+            "Item",
+            filters={"is_sales_item": 1, "has_variants": 0, "disabled": 0, "is_fixed_asset": 0},
+            pluck="name",
+        )
         item_code = item[0] if item else None
         if not item_code:
             it = frappe.get_doc({"doctype": "Item", "item_name": "ITN Test Item", "is_sales_item": 1})
@@ -112,7 +126,12 @@ class TestITN(FrappeTestCase):
         si.submit()
         return si.name
 
-    def _make_log(self, amount=100.00, m_payment_id="PFM-TEST-001", status="Awaiting Payment"):
+    def _make_log(self, amount=100.00, m_payment_id="PFM-TEST-001", status="Awaiting Payment",
+                  reference_docname=..., **extra):
+        # set_only_once fields (reference_docname, customer_mobile, ...) must be
+        # supplied at insert time via `extra`, never mutated after insert.
+        if reference_docname is ...:
+            reference_docname = self.si_name
         if frappe.db.exists("PayFast Payment Log", {"m_payment_id": m_payment_id}):
             name = frappe.db.get_value("PayFast Payment Log", {"m_payment_id": m_payment_id})
             frappe.delete_doc("PayFast Payment Log", name, force=True, ignore_on_trash=True)
@@ -120,11 +139,12 @@ class TestITN(FrappeTestCase):
             "doctype": "PayFast Payment Log",
             "m_payment_id": m_payment_id,
             "reference_doctype": "Sales Invoice",
-            "reference_docname": self.si_name,
+            "reference_docname": reference_docname,
             "customer": self.customer,
             "amount": amount,
             "currency": "ZAR",
             "status": status,
+            **extra,
         })
         log.insert(ignore_permissions=True)
         return log
@@ -156,8 +176,9 @@ class TestITN(FrappeTestCase):
                     self.assertTrue(result.paid_at)
                     self.assertEqual(float(result.amount_gross), 100.00)
                     self.assertEqual(float(result.amount_net), 100.00)
-                    mock_rt.assert_called_once()
-                    args = mock_rt.call_args
+                    paid_events = _paid_events(mock_rt)
+                    self.assertEqual(len(paid_events), 1)
+                    args = paid_events[0]
                     self.assertEqual(args[0][0], "payfast_payment_confirmed")
                     self.assertEqual(args[0][1]["payment_log"], log.name)
                     self.assertEqual(args[0][1]["reference_name"], self.si_name)
@@ -173,7 +194,7 @@ class TestITN(FrappeTestCase):
                 self.assertFalse(result.processed)
                 self.assertFalse(result.signature_valid)
                 self.assertIn("signature", result.review_reason)
-                mock_rt.assert_not_called()
+                self.assertEqual(_paid_events(mock_rt), [])
 
     def test_source_invalid_goes_to_review(self):
         with patch.object(itn_service, "_server_validate", return_value=(True, {})):
@@ -211,7 +232,7 @@ class TestITN(FrappeTestCase):
                 result = self._process(log, payload)
                 self.assertEqual(result.status, "Failed")
                 self.assertTrue(result.processed)
-                mock_rt.assert_not_called()
+                self.assertEqual(_paid_events(mock_rt), [])
 
     def test_server_validate_receives_raw_body(self):
         from urllib.parse import urlencode
@@ -285,13 +306,14 @@ class TestITN(FrappeTestCase):
             "doctype": "Sales Invoice",
             "customer": self.customer,
             "company": frappe.defaults.get_user_default("Company"),
-            "items": [{"item_code": frappe.get_all("Item", {"is_sales_item": 1}, pluck="name")[0],
+            "items": [{"item_code": frappe.get_all(
+                           "Item",
+                           {"is_sales_item": 1, "has_variants": 0, "disabled": 0, "is_fixed_asset": 0},
+                           pluck="name")[0],
                        "qty": 1, "rate": 100.00}],
         })
         draft.insert(ignore_permissions=True)  # left in draft (docstatus 0)
-        log = self._make_log(m_payment_id="PFM-DRAFT-1")
-        log.reference_docname = draft.name
-        log.save(ignore_permissions=True)
+        log = self._make_log(m_payment_id="PFM-DRAFT-1", reference_docname=draft.name)
         payload = _itn_payload(log, passphrase="testpass")
         with patch.object(itn_service, "_server_validate", return_value=(True, {"status": "VALID"})):
             with patch.object(itn_service, "_create_payment_entry") as mock_pe:
@@ -342,14 +364,16 @@ class TestITN(FrappeTestCase):
         with patch.object(itn_service, "_server_validate", return_value=(True, {"status": "VALID"})):
             with patch.object(itn_service, "_create_payment_entry", return_value="PE-EVT-1"):
                 with patch.object(frappe, "publish_realtime") as mock_pub:
-                    log = self._make_log(m_payment_id="PFM-EVT-1")
-                    log.customer_mobile = "+27123456789"
-                    log.whatsapp_conversation_id = "conv-1"
-                    log.save(ignore_permissions=True)
+                    log = self._make_log(
+                        m_payment_id="PFM-EVT-1",
+                        customer_mobile="+27123456789",
+                        whatsapp_conversation_id="conv-1",
+                    )
                     payload = _itn_payload(log, passphrase="testpass")
                     self._process(log, payload)
-                    mock_pub.assert_called_once()
-                    event_name, event_data = mock_pub.call_args[0]
+                    paid_events = _paid_events(mock_pub)
+                    self.assertEqual(len(paid_events), 1)
+                    event_name, event_data = paid_events[0][0]
                     self.assertEqual(event_name, "payfast_payment_confirmed")
                     self.assertEqual(event_data["payment_log"], log.name)
                     self.assertEqual(event_data["reference_name"], self.si_name)
@@ -363,7 +387,7 @@ class TestITN(FrappeTestCase):
                 payload = _itn_payload(log, passphrase="testpass")
                 payload["signature"] = "deadbeef" * 4
                 self._process(log, payload)
-                mock_pub.assert_not_called()
+                self.assertEqual(_paid_events(mock_pub), [])
 
     def test_failed_status_does_not_publish_realtime(self):
         with patch.object(itn_service, "_server_validate", return_value=(True, {})):
@@ -371,7 +395,7 @@ class TestITN(FrappeTestCase):
                 log = self._make_log(m_payment_id="PFM-EVT-FAILED")
                 payload = _itn_payload(log, passphrase="testpass", payment_status="FAILED")
                 self._process(log, payload)
-                mock_pub.assert_not_called()
+                self.assertEqual(_paid_events(mock_pub), [])
 
     def test_claim_for_retry_rejects_already_settled_log(self):
         log = self._make_log(m_payment_id="PFM-RETRY-CLAIM-1", status="ERP Sync Failed")

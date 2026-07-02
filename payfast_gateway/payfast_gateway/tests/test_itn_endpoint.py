@@ -88,7 +88,11 @@ class TestITNEndpoint(FrappeTestCase):
 
     def tearDown(self):
         frappe.set_user(self._orig_user)
+        self.settings.reload()
         for k, v in self._orig.items():
+            if k in ("clearing_account", "mode_of_payment") and not v:
+                # reqd on the doctype; can't restore to empty on a fresh site.
+                continue
             self.settings.set(k, v)
         try:
             self.settings.save(ignore_permissions=True)
@@ -121,7 +125,11 @@ class TestITNEndpoint(FrappeTestCase):
         return c.name
 
     def _make_submitted_sales_invoice(self):
-        item = frappe.get_all("Item", filters={"is_sales_item": 1}, pluck="name")
+        item = frappe.get_all(
+            "Item",
+            filters={"is_sales_item": 1, "has_variants": 0, "disabled": 0, "is_fixed_asset": 0},
+            pluck="name",
+        )
         item_code = item[0] if item else None
         if not item_code:
             it = frappe.get_doc({"doctype": "Item", "item_name": "Endpoint Item", "is_sales_item": 1})

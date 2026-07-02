@@ -8,15 +8,19 @@ from payfast_gateway.payfast_gateway.services import itn as itn_service
 from payfast_gateway.payfast_gateway.services.signature import generate_signature
 
 
-def _make_log(amount=100.00, m_payment_id="PFM-PE-001"):
+def _make_log(amount=100.00, m_payment_id="PFM-PE-001", reference_doctype="Sales Invoice",
+              reference_docname=None, customer=None):
+    # reference_doctype/reference_docname/customer are set_only_once fields;
+    # they must be supplied at insert time, not mutated afterwards.
     name = frappe.db.get_value("PayFast Payment Log", {"m_payment_id": m_payment_id})
     if name:
         frappe.delete_doc("PayFast Payment Log", name, force=True, ignore_on_trash=True)
     log = frappe.get_doc({
         "doctype": "PayFast Payment Log",
         "m_payment_id": m_payment_id,
-        "reference_doctype": "Sales Invoice",
-        "reference_docname": None,
+        "reference_doctype": reference_doctype,
+        "reference_docname": reference_docname,
+        "customer": customer,
         "amount": amount,
         "currency": "ZAR",
         "status": "Awaiting Payment",
@@ -62,7 +66,11 @@ class TestPaymentEntry(FrappeTestCase):
 
     def tearDown(self):
         frappe.set_user(self._orig_user)
+        self.settings.reload()
         for k, v in self._orig.items():
+            if k in ("clearing_account", "mode_of_payment") and not v:
+                # reqd on the doctype; can't restore to empty on a fresh site.
+                continue
             self.settings.set(k, v)
         try:
             self.settings.save(ignore_permissions=True)
@@ -94,7 +102,11 @@ class TestPaymentEntry(FrappeTestCase):
         return c.name
 
     def _make_submitted_sales_invoice(self):
-        item = frappe.get_all("Item", filters={"is_sales_item": 1}, pluck="name")
+        item = frappe.get_all(
+            "Item",
+            filters={"is_sales_item": 1, "has_variants": 0, "disabled": 0, "is_fixed_asset": 0},
+            pluck="name",
+        )
         item_code = item[0] if item else None
         if not item_code:
             it = frappe.get_doc({"doctype": "Item", "item_name": "PE Test Item", "is_sales_item": 1})
@@ -111,10 +123,7 @@ class TestPaymentEntry(FrappeTestCase):
         return si.name
 
     def test_complete_creates_one_payment_entry_and_allocates(self):
-        log = _make_log()
-        log.reference_docname = self.si_name
-        log.customer = self.customer
-        log.save(ignore_permissions=True)
+        log = _make_log(reference_docname=self.si_name, customer=self.customer)
 
         payload = {
             "m_payment_id": log.m_payment_id,
@@ -166,10 +175,7 @@ class TestPaymentEntry(FrappeTestCase):
         """
         from frappe.model.document import Document
 
-        log = _make_log()
-        log.reference_docname = self.si_name
-        log.customer = self.customer
-        log.save(ignore_permissions=True)
+        log = _make_log(reference_docname=self.si_name, customer=self.customer)
 
         payload = {
             "m_payment_id": log.m_payment_id,
@@ -217,11 +223,47 @@ class TestPaymentEntry(FrappeTestCase):
         # Exactly one Payment Entry for this payment (no duplicate created on retry).
         self.assertEqual(frappe.db.count("Payment Entry", {"reference_no": "PF12345"}), 1)
 
+    def test_partial_payment_creates_pe_capped_at_paid_amount(self):
+        """A verified partial payment (log.amount < outstanding) must create a
+        Payment Entry for exactly the paid amount -- not the full outstanding --
+        and must not mark the Sales Invoice fully Paid."""
+        log = _make_log(amount=40.00, m_payment_id="PFM-PE-PARTIAL",
+                        reference_docname=self.si_name, customer=self.customer)
+
+        payload = {
+            "m_payment_id": log.m_payment_id,
+            "pf_payment_id": "PF12345",
+            "payment_status": "COMPLETE",
+            "amount_gross": "40.00",
+            "amount_fee": "0.00",
+            "amount_net": "40.00",
+            "merchant_id": "10000100",
+            "item_name": "Test",
+        }
+        items = [(k, v) for k, v in payload.items()]
+        payload["signature"] = generate_signature(items, "testpass")
+
+        with patch.object(itn_service, "_server_validate", return_value=(True, {"status": "VALID"})):
+            itn_service.process_itn(log.name, raw_payload_json=json.dumps(payload), source_host="www.payfast.co.za")
+
+        log.reload()
+        self.assertEqual(log.status, "Complete")
+        self.assertTrue(log.processed)
+
+        pe = frappe.get_doc("Payment Entry", log.payment_entry)
+        self.assertEqual(pe.docstatus, 1)
+        # Payment Entry amount is capped at what was actually paid.
+        self.assertAlmostEqual(float(pe.paid_amount), 40.00, places=2)
+        refs = [r for r in pe.references if r.reference_name == self.si_name]
+        self.assertEqual(len(refs), 1)
+        self.assertAlmostEqual(float(refs[0].allocated_amount), 40.00, places=2)
+
+        si = frappe.get_doc("Sales Invoice", self.si_name)
+        self.assertAlmostEqual(float(si.outstanding_amount), 60.00, places=2)
+        self.assertNotEqual(si.status, "Paid")
+
     def test_itn_only_marks_paid_after_all_checks(self):
-        log = _make_log()
-        log.reference_docname = self.si_name
-        log.customer = self.customer
-        log.save(ignore_permissions=True)
+        log = _make_log(reference_docname=self.si_name, customer=self.customer)
         payload = {
             "m_payment_id": log.m_payment_id,
             "pf_payment_id": "PF12345",
@@ -250,21 +292,27 @@ class TestPaymentEntry(FrappeTestCase):
             self.skipTest("ERPNext not available")
 
         customer = self.customer
-        item = frappe.get_all("Item", filters={"is_sales_item": 1}, pluck="name")[0]
+        item = frappe.get_all(
+            "Item",
+            filters={"is_sales_item": 1, "has_variants": 0, "disabled": 0, "is_fixed_asset": 0},
+            pluck="name",
+        )[0]
         so = frappe.get_doc({
             "doctype": "Sales Order",
             "customer": customer,
             "company": frappe.defaults.get_user_default("Company"),
-            "items": [{"item_code": item, "qty": 1, "rate": 100.00}],
+            "items": [{
+                "item_code": item,
+                "qty": 1,
+                "rate": 100.00,
+                "delivery_date": frappe.utils.add_days(frappe.utils.nowdate(), 7),
+            }],
         })
         so.insert(ignore_permissions=True)
         so.submit()
 
-        log = _make_log(m_payment_id="PFM-SO-001")
-        log.reference_doctype = "Sales Order"
-        log.reference_docname = so.name
-        log.customer = customer
-        log.save(ignore_permissions=True)
+        log = _make_log(m_payment_id="PFM-SO-001", reference_doctype="Sales Order",
+                        reference_docname=so.name, customer=customer)
 
         payload = {
             "m_payment_id": log.m_payment_id,
@@ -294,6 +342,8 @@ class TestPaymentEntry(FrappeTestCase):
                 if pe.docstatus == 1:
                     pe.cancel()
                 frappe.delete_doc("Payment Entry", log.payment_entry, force=True)
+            # The PE allocation updated the SO (advance paid); refresh before cancel.
+            so.reload()
             if so.docstatus == 1:
                 so.cancel()
             frappe.delete_doc("Sales Order", so.name, force=True)
