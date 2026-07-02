@@ -1,1 +1,2 @@
 # This file is auto-generated. List any patch files here, one per line.
+payfast_gateway.patches.v0_1.rebuild_awaiting_redirect_payloads

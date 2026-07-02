@@ -111,6 +111,14 @@ def _build_redirect_payload(log, creds, customer_doc=None):
 
     merchant_key IS transmitted (to PayFast) but never logged elsewhere.
     passphrase is never transmitted and never logged (only used in signature).
+
+    PayFast regenerates the signature from the variables it actually receives,
+    so the transmitted form MUST be byte-identical to the signature basis:
+    blank fields are dropped from BOTH (transmitting a blank field while
+    excluding it from the signature yields "Generated signature does not match
+    submitted signature"), values are trimmed, and no extra fields (e.g. a
+    `testing` flag, which is not a PayFast redirect parameter — sandbox is
+    selected purely by the process URL) are ever appended.
     """
     settings = get_settings()
     item_name = log.item_name or ""
@@ -132,9 +140,13 @@ def _build_redirect_payload(log, creds, customer_doc=None):
         "item_description": log.item_description or "",
         "custom_str1": log.reference_doctype + "|" + log.reference_docname,
     }
-    ordered = [(name, fields.get(name, "")) for name in REDIRECT_FIELD_ORDER if name in fields]
-    if settings.environment == "Sandbox":
-        ordered.append(("testing", "true"))
+    ordered = []
+    for name in REDIRECT_FIELD_ORDER:
+        if name not in fields:
+            continue
+        value = "" if fields[name] is None else str(fields[name]).strip()
+        if value:
+            ordered.append((name, value))
     signature = generate_signature(ordered, creds.get("passphrase") or "")
     payload_for_form = {name: value for name, value in ordered}
     payload_for_form["signature"] = signature
